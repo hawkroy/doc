@@ -35,4 +35,28 @@ VimScript Studying
 # Local valid
   `setlocal <option>` or `map <buffer> ....` will work for current buffer, if change to another buffer, these will take no effect. if mapping exist in local & global, local will be taken firstly.
 
+# Variable
+use `let var = val` to define variable, for options can add "&option" to make it as variable, use prefix "l:" to define local varialbe
+`help internal-variables` to see variable scope
 
+# If
+use `==#` to compare, because `==` is due to users configuration, may generate wrong answer for string compare, same as `>/<` etc. if string start with non-number, then treat as 0.
+
+# Function
+use `call` to call function, the retval will be discard or invoke function in any expression.
+Note: function definition should always be with UPPER-Capital. Function's varialbe is immutable.
+```
+function Myfunc(foo, ...)
+  echo a:foo        " named arg
+  echo a:0          " return variable arg #0
+  echo a:1          " return varialbe arg #1
+  echo a:000        " return variable arguments list
+endfunction
+```
+
+# String & Number
+* string
+  use `.` to contact 2 strings or one integer, one string, not allowed float varialbe
+  when use `''`, no special sequence works, like "\n"
+* number
+  when use scientific format, `xx.xxexx` the "." should alway be there
