@@ -1,9 +1,8 @@
 # 安装CUDA-8.0
 ## 安装bumble-bee
 ```sudo apt-get install bumblebee bumblebee-nvidia primus bbswitch-dkms```
-安装好bumblebee项目后，默认情况下N卡不启动，只有使用```optirun XXX```命令才会使用N卡
+使用```lspci```命令显示NVIDIA-CARD的rev为ff，表明N卡不起动，只有使用```optirun XXX```命令才会使用N卡
 可以使用```optirun glxgears```进行测试，如果正常运行，则说明已经成功
-```lspci```命令显示NVIDIA-CARD的rev为ff
 目前Debian-9官方的nvidia显卡驱动为rev-375
 
 有的时候，运行optirun会遇到如下错误
@@ -31,6 +30,7 @@
     export GL_PATH=/usr/lib
 ```
 每次运行cuda程序前，使用```. setenv.sh```设置cuda的编译和运行环境
+
 # 安装WPS
 ## 官网下载WPS的最新安装程序
 从官网下载的WPS安装程序可以安装，dpkg过程中会报错，也无法运行，因为缺少必要的libpng12-0的动态库。所以必须自己制作可以使用的WPS安装程序
