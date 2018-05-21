@@ -1,17 +1,24 @@
-# Vim在Windows中使用Python编写Vim脚本
+# Vim使用技巧
+
+## 基本
+
+只使用`[mode]noremap`的非递归方式，避免vim递归解析mapping
+
+使用`set mapleader`和`set maplocalleader`设置mapping中的`<leader>`
+
+## Vim在Windows中使用Python编写Vim脚本
+
 配置pythonXX.dll和python.exe所在的目录到用户或是系统的path中，设置python的安装目录(包含lib目录)的文件夹到PYTHONHOME的全局变量，使用```:python import os```进行测试
 
----
-
-# 脚本目录结构
+## 脚本目录结构
 - Plugin
-- Ftplugin
+- Ftplugins
 - Indent
 - Autoload
 - Syntax
 - Colors
 
-# 脚本变量作用域
+## 脚本变量作用域
 - v: vim-predefined全局作用域
 - g: 全局作用域，在整个vim运行过程中都可见，不加变量域修饰时的默认作用域
 - b: 只作用于buffer定义中
@@ -21,9 +28,7 @@
 - s: 在某个文件中定义的，与<SID>相关
 - a: 函数的参数作用域
 
----
-
-# Cscope支持
+## Cscope支持
 使用的命令
 - cscope add  添加一个cscope数据库
 - cscope find进行查找, Vim支持8种cscope查询： 
@@ -38,10 +43,8 @@
 
 插入自[http://easwy.com/blog/archives/advanced-vim-skills-cscope/](http://easwy.com/blog/archives/advanced-vim-skills-cscope/)
 
----
-
-# Windows, Tabs, Buffers
-## Buffer
+## Windows, Tabs, Buffers
+### Buffer
 Buffer是指在编辑文件的缓冲区，包括对于这个文件的设置和标记信息
 状态
 
