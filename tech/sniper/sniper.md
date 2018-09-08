@@ -98,6 +98,8 @@ sniper分为pin-tool和standalone两种模式：
 
 ## SIFT格式分析
 
+### 输入/输出接口
 
+![I/O class](dia/sniper_io_class.png)
 
 ## Sniper 仿真类分析
