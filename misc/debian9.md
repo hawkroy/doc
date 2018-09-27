@@ -23,7 +23,7 @@
 安装包里已经包含了Sample程序，主要选择好具体的安装位置就好
 
 ## 配置编译/运行环境
-某些cuda的sample code需要x11的支持，所以下载如下packets
+某些cuda的sample code需要x11的支持，所以下载如下packeges
 ```sudo sudo apt-get install freeglut3-dev libx11-dev libxmu-dev libxi-dev libglu1-mesa libglu1-mesa-dev```
 最后，编写脚本
 ```bash
