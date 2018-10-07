@@ -240,7 +240,7 @@ Sniper
 
   Interface: _Thread
 
-  ​	Interface:
+  ​	Function:
 
   ​		virtual void run() = 0
 
@@ -254,7 +254,7 @@ Sniper
 
   Interface: Runnable  
 
-  ​	Interface: 
+  ​	Function: 
 
   ​		virtual void run() = 0
 

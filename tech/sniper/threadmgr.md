@@ -27,7 +27,23 @@ Thread manager用来管理所有抽象的Application对应的Thread集合，类�
 
 ### 接口
 
-TBD
+| 接口                      | 功能                                  |
+| ------------------------- | ------------------------------------- |
+| set/get_XXX               | 用于设置内部成员变量的set/get函数     |
+| <u>**for TraceMgr**</u>   |                                       |
+| createThread              |                                       |
+| <u>**Thread service**</u> |                                       |
+| spawnThread               | used in Pin-tool mode                 |
+| joinThread                |                                       |
+| getThreadToSpawn          | used in Pin-tool mode                 |
+| waitForThreadStart        |                                       |
+| <u>**Event**</u>          |                                       |
+| onThreadStart             |                                       |
+| onThreadExit              |                                       |
+| <u>**Misc**</u>           |                                       |
+| stallThread/_async        |                                       |
+| resumeThread/_async       |                                       |
+| moveThread                | 用于scheduler调度时执行线程的迁移动作 |
 
 ### 流程
 

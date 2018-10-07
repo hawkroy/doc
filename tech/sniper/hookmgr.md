@@ -12,9 +12,30 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 
 ## HookPoint
 
+### APIs
+
+```c++
+// 注册callback
+void registerHook(
+  	HookType::hook_type_t type, 		// hook point
+  	HookCallbackFunc func, 					// hook func, always a static class func
+  	UInt64 argument, 								// hook param, always class object pointer(this)
+  	HookCallbackOrder order = ORDER_NOTIFY_PRE	// call order
+);
+
+// invoke callback
+SInt64 callHooks(
+  	HookType::hook_type_t type, 		// hook point
+  	UInt64 argument, 								// actual callback parameter, not like registerHook's argument,   it->func(it->argument(this), argument)
+  	bool expect_return = false			// should return value
+);
+```
+
+
+
 ### CallOrder
 
-不同的callback有不同的执行order
+不同的callback有不同的执行order，对应不同的call point，不代表不同的CallOrder有优先级关系
 
 - ​      ORDER_NOTIFY_PRE,       // For callbacks that want to inspect state before any actions
 - ​      ORDER_ACTION,           // For callbacks that want to change simulator state based on the event
@@ -262,6 +283,13 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 
   HooksManager::ThreadCreate
 
+  ```c++
+  typedef struct {
+    thread_id_t thread_id;
+    thread_id_t creator_thread_id;
+  } ThreadCreate;
+  ```
+
 - Callback Announcer
 
   ThreadManager::createThread_unlocked
@@ -281,6 +309,13 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 - Parameter (cast from UInt64)
 
   HooksManager::ThreadTime
+
+  ```c++
+  typedef struct {
+    thread_id_t thread_id;
+    subsecond_time_t time;
+  } ThreadTime;
+  ```
 
 - Callback Announcer
 
@@ -332,6 +367,14 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 
   HooksManager::ThreadStall
 
+  ```c++
+  typedef struct {
+    thread_id_t thread_id;  						// Thread stalling
+    ThreadManager::stall_type_t reason; // Reason for thread stall
+    subsecond_time_t time;  						// Time at which the stall occurs (if known, else SubsecondTime::MaxTime())
+  } ThreadStall;
+  ```
+
 - Callback Announcer
 
   ThreadManager::stallThread_async
@@ -358,6 +401,14 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 
   HooksManager::ThreadResume
 
+  ```c++
+  typedef struct {
+    thread_id_t thread_id;  	// Thread being woken up
+    thread_id_t thread_by;  	// Thread triggering the wakeup
+    subsecond_time_t time;  	// Time at which the wakeup occurs (if known, else SubsecondTime::MaxTime())
+  } ThreadResume;
+  ```
+
 - Callback Announcer
 
   ThreadManager::resumeThread_async
@@ -381,6 +432,14 @@ Hook Manager定义了sniper模拟器中所有预发生的模拟事件，每一�
 - Parameter (cast from UInt64)
 
   HooksManager::ThreadMigrate
+
+  ```c++
+  typedef struct {
+    thread_id_t thread_id;  		// Thread being migrated
+    core_id_t core_id;      		// Core the thread is now running (or INVALID_CORE_ID == -1 for unscheduled)
+    subsecond_time_t time;  		// Current time
+  } ThreadMigrate;
+  ```
 
 - Callback Announcer
 

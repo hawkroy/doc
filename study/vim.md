@@ -28,7 +28,18 @@
 - s: 在某个文件中定义的，与<SID>相关
 - a: 函数的参数作用域
 
+## mode-line
+
+在不同的文件格式下，使用注释的方式在行末或行首添加
+
+```vim
+vim: set tagstop=2, nowrap, ...
+```
+
+
+
 ## Cscope支持
+
 使用的命令
 - cscope add  添加一个cscope数据库
 - cscope find进行查找, Vim支持8种cscope查询： 
