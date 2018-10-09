@@ -531,10 +531,135 @@ DynamicInstruction和StaticInstruction
 ### ThreadControl
 
 - createThread
+
+  这里的thread交互处理主要针对的是使用pthread创建的thread，这类thread在kernel中会使用sys_clone(FLAG|=CLONE_THREAD)的方式进行创建；sniper模拟器需要模拟这个部分是因为sniper截获模拟了pthread的若干处理函数，所以需要知道thread具体的状态，需要通过tidptr(intptr_t)结构获得
+
+  对于不是pthread创建的thread，sniper并不知道thread的创建，按照目前的理解，也无法进行通信
+
+  ```mermaid
+  sequenceDiagram
+  	participant pin as Pin
+  	participant trT as TraceThread
+  	participant trM as TraceManager
+  	participant thM as ThreadManager
+  	
+  	alt sys_clone(~CLONE_THREAD{CLT})
+  		Note over pin: CLT for pthread
+  		pin ->> pin: Host OS handle
+  	else sys_clone(CLONE_THREAD), need to set futex
+  		pin ->> pin: create %app.%th.sift trace channel
+  		pin ->> pin: save children's tidptr
+  		pin ->>+ trT: RecOtherNewThread
+  		trT ->>+ trM: create thread
+  		trM ->> trM: attach %app.%th.sift trace channel
+  		trM ->>+ trT: create trace thread
+  		trT ->>- trM: return tthread [host thread]
+  		trM ->>+ thM: create virtual thread
+  		thM ->>- trM: add thread to Scheduler
+  		trM ->> trT: spawn tthread [host thread]
+  		trM ->>- pin: done
+  	end
+  ```
+
 - exitThread
+
+  主要描述当某个thread执行结束的时候，如何和sniper仿真器交互进行thread的exit和pthread_join的操作
+
+  ```mermaid
+  sequenceDiagram
+  	participant pin as Pin
+  	participant trT as TraceThread
+  	participant trM as TraceManager
+  	participant scM as SysCallModeling
+  	participant thM as ThreadManager
+  	
+  	Note left of pin: threadExit path
+  	alt tg last thread
+  		pin ->>+ trT: syscall(SYS_exit_group)
+  		trT ->> trT: stop all threads in tg
+  		trT ->> trM: send signalDone for all threads in tg
+  		trT ->>- pin: done
+  	else not last thread for pthread_join
+  		pin ->>+ trT: syscall(SYS_futex)
+  		trT ->>+ scM: handle FutexWake syscall
+  		scM -->> trM: access Pin Memory for tidptr
+      trM -->> pin: access Pin Memory for tidptr
+      scM ->> scM: wakeup waiting threads
+      scM ->> thM: resume virtual thread
+      scM ->>- trT: ret val
+      trT ->>- pin: done
+  	end
+  ```
+
 
 ### Instruction Execution
 
-- SystemcCall execution
+- SysCall execution
+
+  描述程序执行过程中，遇到syscall的执行时，Pin和Sniper之间的交互处理
+
+  | Number ship to Sniper                 | Sniper emulate?       | Thread hangup? |
+  | ------------------------------------- | --------------------- | -------------- |
+  | SYS_clone [创建线程]                  | notify (host emulate) | no             |
+  | SYS_read [??]                         | notify (host emulate) | yes            |
+  | SYS_write [??]                        | notify (host emulate) | no             |
+  | SYS_wait4 [等待子进程]                | notify (host emulate) | yes            |
+  | SYS_futex [同步信号，pthread相关]     | emulate               | no             |
+  | SYS_sched_yield [主动让渡CPU]         | emulate               | no             |
+  | SYS_sched_setaffinity [设置CPU亲和性] | emulate               | no             |
+  | SYS_sched_getaffinity [获得CPU亲和性] | emulate               | no             |
+  | SYS_nanosleep [nano sleep睡眠]        | emulate               | no             |
+  | SYS_exit_group [整个thread group退出] | notify (host emulate) | no             |
+
+
+
+  ```mermaid
+  sequenceDiagram
+  	participant app as Application
+  	participant pin as Pin
+  	participant trT as TraceThread
+  	participant scM as SyscallModeling
+  	
+  	alt emulate?
+  		app ->> pin: [before syscall ins] syscall emulate
+  		pin ->> trT: syscall emulate for selected syscall
+  		trT ->>+ scM: syscall handle
+  		alt real emulate
+  			scM ->> pin: ret val
+  			app ->> app: [syscall enter], fake syscall(SYS_getpid)
+  			app ->>+ pin: [syscall exit], retreive ret val
+  			pin ->>- app: ret val
+  		else notify
+  			scM ->>- pin: fake val (thread maybe hangup)
+  			app ->> pin: [syscall enter]
+  			pin ->> app: no handle, host handle
+  			app ->> pin: [syscall exit]
+  			pin ->> app: no val, host val
+  		end
+  	else host?
+  		app ->> app: host handle syscall
+  	end
+  ```
+
 - Call/Exit Routine function
+
+  描述基于Routine粒度的统计和trace信息；TBD
+
 - Instruction Execution
+
+  描述每条执行过程中与sniper模拟器的交互处理
+
+  ```mermaid
+  sequenceDiagram
+  	participant app as Application
+  	participant pin as Pin
+  	participant sfr as SiftReader
+  	participant trT as TraceThread
+  	
+  	app ->> pin: insCallback for mem-access/branch-info, etc
+  	pin ->> sfr: send machine-code/va2pa/inst-info
+  	sfr ->> sfr: build dynamicInst & staticInst
+  	sfr ->> trT: send dynamicInst
+  ```
+
+
