@@ -528,6 +528,32 @@ DynamicInstruction和StaticInstruction
 
 ### ProcessControl
 
+- Fork
+
+  ```mermaid
+  sequenceDiagram
+  	participant app as Application
+  	participant pin as Pin
+  	participant trT as TraceThread
+  	participant trM as TraceManager
+  	
+  	Note left of app: before fork
+  	app -->> pin: fork child thread
+  	pin ->>+ trT: Fork message
+  	trT ->> trM: create virtual process(main-thread)
+  	trM ->> trM: create %app.%th.sift trace channel
+  	trM ->>+ trT: create trace thread
+  	trT ->>- trM: return tthread [host thread]
+  	trM ->>+ thM: create virtual thread
+  	thM ->>- trM: add thread to Scheduler
+  	trM ->> trT: spawn tthread [host thread]
+  	trT ->>- app: fork done
+  	
+  	Note left of app: after fork
+  	app ->> app: attach %app.%th.sift trace channel
+  	app ->> app: create siftWriter for tracing
+  ```
+
 ### ThreadControl
 
 - createThread
@@ -655,11 +681,19 @@ DynamicInstruction和StaticInstruction
   	participant pin as Pin
   	participant sfr as SiftReader
   	participant trT as TraceThread
+  	participant perfM	as PerformanceModel
   	
   	app ->> pin: insCallback for mem-access/branch-info, etc
   	pin ->> sfr: send machine-code/va2pa/inst-info
-  	sfr ->> sfr: build dynamicInst & staticInst
-  	sfr ->> trT: send dynamicInst
+  	loop Sift read instruction
+  		sfr ->> sfr: build x86 inst-info
+  		sfr ->> trT: send x86 insts
+  		trT ->> trT: build x86 dynamic inst with uops
+  		trT ->> perfM: queue x86 dynamic inst
+  		perfM ->> perfM: iterate one inst
+  		trT ->> trT: check reschedule
+  		trT -->> sfr: return back
+  	end
   ```
 
 

@@ -174,6 +174,10 @@ Sniper
 
 ​		某种Cache Coherency的实现方式
 
+## Sniper Standalone执行结构
+
+![class-relationship](dia/sniper_class_relationship.png)
+
 ## Sniper类族谱
 
 ### 仿真类
@@ -182,9 +186,21 @@ Sniper
 
   总的仿真对象的集合，包含了所有仿真时需要的仿真对象，是个Singleton的单件模式
 
-- FastForwardPerformanceManager
+- ThreadManager
+
+  实现类似于OS调度功能，用来管理虚拟Thread的调度处理
+
+- TraceManager
+
+  用于管理trace-thread，trace-thread是被simulate的app在sniper端的代表，用于生成x86指令、实现调度，实现syscall等所有与pin的交互功能，本身通过host thread实现
+
+- SimThreadManager
+
+  用于network的仿真，从代码看，每个network的router实际上是一个Core模型，用于转发收到的网络包
 
 - MagicServer
+
+  用于sniper自定义的magic instruction相关的处理，magic instruction在sniper中被定义为xchg bx, bx，然后通过不同的寄存器传递不同的参数代表不同的处理流程，类似于syscall的调用
 
 - HooksManager
 
@@ -196,43 +212,33 @@ Sniper
 
 - SyncServer
 
-  系统的多个Core仿真核的同步管理类
-
-- ThreadManager
-
-- TraceManager
+  TBD
 
 - ClockSkewMinimizationManager
 
 - ClockSkewMinimizationServer
 
+  这两个类，共同实现系统的多个Core仿真核的同步管理(barrier-sync)
+
 - CoreManager
+
+  进行仿真核的管理，主要针对network中的simThread和Core的performanceModel中coreThread进行管理
 
 - StatsManager
 
-- TagsManager
-
-- Transport
+  统计信息的管理
 
 - DvfsManager
 
+  Core动态电压调频的处理模块
+
 - FaultinjectionManager
 
-- ThreadStatsManager
+  错误注入管理类，用于系统中的HW错误注入
 
-- SimThreadManager
+- FastForwardPerformanceManager
 
-- SamplingManager
-
-- RoutineTracer
-
-- MemoryTracker
-
-- InstructionTracer
-
-- Fxsupport
-
-- PthreadEmu
+  TBD
 
 ### 多线程类
 
@@ -260,11 +266,12 @@ Sniper
 
   ​	Impl:   
 
-| CoreThread  | 仿真Core某个physical thread的类 |
-| ----------- | ------------------------------- |
-| SimThread   | 仿真网络中的收发包线程          |
-| Monitor     | 用于检查Sift的连接的monitor线程 |
-| TraceThread | 用于解析Sift的前端trace模型     |
+| CoreThread  | 仿真Core某个physical thread的类        |
+| ----------- | -------------------------------------- |
+| SimThread   | 仿真网络中的收发包线程                 |
+| Monitor     | 用于检查Sift的连接的monitor线程        |
+| TraceThread | 用于解析Sift的前端trace模型            |
+| CoreThread  | 用于每个Core Model的仿真(目前没有启用) |
 
 每个Runnable的实现者都会include一个Thread结构，用于创建可执行的host thread，然后调用Thread的run方法从而执行Runnable的run方法
 
