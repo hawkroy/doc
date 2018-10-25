@@ -165,6 +165,10 @@ back-end event
 
    **penalty = miss-latency - W/D， W表示ROB大小；通常，W/D << miss-latency，所以penalty ~= miss-latency**
 
+   long-latency define：通过上图可以看到，long-latency miss指的是当latency不足以被ROB大小覆盖的时候导致的pipeline stall，所以这要求**long-latency > W/D**
+
+   ==问题：实际上，所有delay>W/D的操作都可以归类为long-latency miss，套用这里的分析进行处理；比如float-point div==
+
 miss event间的overlap
 
 1. front-end VS. front-end
@@ -201,7 +205,11 @@ miss event间的overlap
 
       **这里假设load latency的load有相同的memory access time**
 
+      ==问题：实际上，这种假设是有问题的，无法保证后面overlap的long-latency load的delay一定<=前面的long-latency load的delay，所以会引入误差==
+
       如何识别indpent load，需要在某个long-latency load往后的W条指令中进行搜索对应的load指令(**这里的indepnt包括寄存器和内存地址**)
+
+      ==问题：这里的long-latency load实际只是一个代表，不一定特别指代load操作，比如float-point的div操作，如果L > W/D，一样可以认为是long-latency load，而这里的indepent load实际上还要考虑resource contention的结果，比如float-point的div如果不能是pipe处理的，且仅有一个对应的处理单元，那么多个div之间实际建立了依赖关系；这里并没有考虑这方面的问题==
 
 ##### 时间统计公式
 
@@ -221,6 +229,40 @@ $Time_c = N / D + \sum_{i}^{miss-events}{penalty_i}$
    1. pending hit，即两笔miss load访问相同的cache line
    2. false indepent的long-latency-load处理
 
-##### 算法实现过程
+##### 算法实现过程 ("two-window" method)
+
+![interval-simulator](dia/interval-simulation.png)
+
+![two-window](dia/two-window.png)
+
+建立2个Window窗口(old/new window)，每个窗口大小为ROB大小
+
+- old window：表示已经经过dispatch，在back-end中执行的指令。*这里是粗略估计执行的指令，真实Core中，随着retire的进行，并不总能保证有ROB总是满的状态*。这个部分主要用来估计程序中的ILP和D~effective-rate~
+- new window：即将进入dispatch的指令，用来进行overlap指令的甄别。为了保证可以看到“足够的”(ROB大小)指令窗口查看overlap指令，算法只在new window处于满的状态下运行
+
+```c++
+void inteval_model(inst) {
+  /*
+   * interval model always at dispatch-point to handle inst penalty
+   * steps (when window full):
+   *	1. run function model first for inst(BP and cache model)
+   *	2. enumerate inst' miss event, add penalty to core time
+   */
+  if (!newW->full()) {
+    // new window not full, add it
+    newW->add(inst);
+    return ;
+  }
+  while (!newW->empty()) {
+    // new window already full, run interval simulate
+    dispatch_effective = calcDispatchEffective();		// calc dispatch rate for ILP
+    while (dispatch_inst < dispatch_effective) {
+      if (miss_event & !overlap)
+    }
+  }
+}
+```
+
+
 
 #### ROB model
