@@ -70,9 +70,11 @@ x86 inst --->
 
 ### One-IPC model
 
+TBD
+
 ### Micro-op Model
 
-
+TBD
 
 ### Interval model
 
@@ -133,11 +135,11 @@ x86 inst --->
 3. I(Issue width) >= D
 4. 各种Queue Depth和FIFO depth不会导致处理器因为资源竞争stall
 
-==问题：一般来说，即使可以保证Core中所有结构都是足量设计，也无法保证Core总是按照Dispatch width的速率执行代码，因为程序本身有天然的ILP属性，ILP低的程序，无法做到按照Dispatch width的速率执行，所以这里是模型假设上的过估计==
+==问题：一般来说，即使可以保证Core中所有结构都是足量设计，也无法保证Core总是按照Dispatch width的速率执行代码，因为程序本身有天然的ILP属性，ILP低的程序，无法做到按照Dispatch width的速率执行，所以这里是模型假设上的overestimate==
 
 ##### Miss Event
 
-front-end event
+**front-end event**
 
 1. I-cache miss
 
@@ -153,7 +155,7 @@ front-end event
 
    **penalty = branch resolution-time + front-end refill time，其中front-end refill time在interval model中是固定的前端pipeline的长度**
 
-back-end event
+**back-end event**
 
 1. short-latency miss
 
@@ -169,7 +171,7 @@ back-end event
 
    ==问题：实际上，所有delay>W/D的操作都可以归类为long-latency miss，套用这里的分析进行处理；比如float-point div==
 
-miss event间的overlap
+**miss event间的overlap**
 
 1. front-end VS. front-end
 
@@ -213,7 +215,7 @@ miss event间的overlap
 
 ##### 时间统计公式
 
-$Time_c = N / D + \sum_{i}^{miss-events}{penalty_i}$
+​	$Time_c = N / D + \sum_{i}^{miss-events}{penalty_i}$
 
 #### Interval Model Enhancement
 
@@ -241,7 +243,8 @@ $Time_c = N / D + \sum_{i}^{miss-events}{penalty_i}$
 - new window：即将进入dispatch的指令，用来进行overlap指令的甄别。为了保证可以看到“足够的”(ROB大小)指令窗口查看overlap指令，算法只在new window处于满的状态下运行
 
 ```c++
-void inteval_model(inst) {
+void inteval_model(inst)
+{
   /*
    * interval model always at dispatch-point to handle inst penalty
    * steps (when window full):
@@ -253,16 +256,146 @@ void inteval_model(inst) {
     newW->add(inst);
     return ;
   }
-  while (!newW->empty()) {
+  
+  latency = 0;
+  while (newW->full()) {
     // new window already full, run interval simulate
+    dispatch_num = 0;
     dispatch_effective = calcDispatchEffective();		// calc dispatch rate for ILP
-    while (dispatch_inst < dispatch_effective) {
-      if (miss_event & !overlap)
+    
+    while (!newW->empty() && !frontend_miss && dispatch_num < dispatch_effective) {
+      dispatch_inst = newW->getDispatchInst();
+      if (dispatch_inst->miss_event && !overlap)
+        latency += handle-missevent();
+    }
+    
+    if (!newW->empty() !frontend_miss && dispatch_num == dispatch_effectvie) {
+    	// means all dispatch_num dispatch in this cycle
+      latency += 1;
     }
   }
 }
 ```
 
+##### D~effective~的计算
+
+old-window保存了所有已经Dispatch进入ROB，等待执行或者已经执行的指令，主要计算Interval Core的有效Dispatch Rate(即有效IPC)，这个值反映了程序的ILP特性。
+
+具体的方法：
+
+1. 构造当前old-window的程序数据流图(data-flow)，表示各个指令间的依赖关系
+
+2. 根据具体的模拟的Core的架构，计算各个节点的execution-time，这个时间反映了每条指令completion-time(也是依赖于它的后续指令的issue-time)
+
+3. 计算old-window的"最老"完成时间, CriticalTime~head~ = max(ExecTime~oldest_inst~, CriticalTime~head~)；计算old-window的"最新"完成时间，CriticalTime~tail~ = max(ExecTime~newadd-inst~, CriticalTime~tail~)；计算CriticalPath = CritialTime~tail~ - CritialTime~head~
+
+4. 考虑各个Function Unit资源竞争的影响
+
+   CritialPath = max(CriticalPath, S~i~)，其中S~i~ 表示当前old-window中发送到FuncUnit~i~的指令数完全处理完成需要的Cycle数。
+
+   *举个例子，假设初步计算的CriticalPath=4，有FunctionUnit 0-4，OldWindow中有如下的指令，所有指令没有依赖关系*
+
+   ![oldw-status](dia/oldw-status.png)
+
+   *其中，G表示指令可以发送到0，1，4；每个FunctionUnit的处理时延都是1T，且都可以Pipe处理*
+
+   *那么，S~0~ = 3, S~1~ = 3, S~2~ = 5, S~3~ = 1, S~4~ = 3。所以，对于目前的Window来说，全部处理完成需要5个Cycle*
+
+5. 计算D~effective~ = min(D, NumInst~old-win~ / CriticalPath)，利用Little-law(利特尔法则)
+
+*利特尔法则，在一个稳定的系统中，平均吞吐率=在制品数量/平均前置时间*
+
+*例子：你正在排队买快餐，在你前面有19个人在排队，你是第20个，已知收银窗口每分钟能处理一个人的点餐需求，求解你的等待时间。 20/1 = 20分钟*
+
+*对应到计算机中，反映了Bandiwith(吞吐率)，容量(在制品)，和时延(前置时间)的关系*
+
+![real-interval](dia/real-interval.png)
+
+通过这种方式形成的Inverval不像之前的分析中那么平滑
+
+==问题：通过这种方式进行ILP的评估可能会出现underestimation，因为这样计算出来的Criticalpath不一定是真正的critical-path，可能比实际的critical-path要多几个cycle，要看CriticalTime~head~是否在critical-path上==
+
+##### Miss-Event的处理
+
+1. I-Cache miss的处理
+
+   ```c++
+   uint64_t handle_icachemiss(void)
+   {
+     clearOldWindow(CriticalTime_tail + icache_delay); // 清空OldWindow，并更新CriticalTime_head和CriticalTime_tail到参数值；这样做隐含的意思是当发生icache miss，ROB中的指令一定都会处理完成，ROB处于empty状态
+     frontmiss = true;
+     return icache_delay;
+   }
+   ```
+
+2. Branch miss的处理
+
+   ```c++
+   uint64_t handle_brmiss(void)
+   {
+     uint64_t branch_delay = oldW->calcBranchResolutionTime()+frontend_refill_param;
+     clearOldWindow(CriticalTime_tail+branch_delay);
+     frontmiss = true;
+     return branch_delay;
+   }
+   ```
+
+   处理Branch指令的resolution time的方法：
+
+   ​	branch指令的resolution time指的是branch最早可以执行的时间，所以这里算法采用计算branch最长依赖链的执行时间的方式精确获得branch的最早执行时间
+
+   ​	算法从br依赖的最近节点反向层序遍历整个依赖图，依次累加更新每个节点的执行时间，最后选择累加值最大的那个节点。以下图为例，最终的branch resolution time=2节点上的11
+
+   ```mermaid
+   graph TD
+   	inst1((1,exec=2))
+   	style inst1 fill:#f9f,stroke:#333
+   	inst2((2,exec=5))
+   	style inst2 fill:#f9f,stroke:#333
+   	inst3((3,exec=1))
+   	style inst3 fill:#f9f,stroke:#333
+   	inst4((4,exec=3))
+   	style inst4 fill:#f9f,stroke:#333
+   	inst5((5,exec=1))
+   	style inst5 fill:#f9f,stroke:#333
+   	inst6((6,exec=2))
+   	style inst6 fill:#f9f,stroke:#333
+   	br((br))
+   
+   	inst1 -- 0 --> br
+   	inst2 -- 6 --> inst3
+   	inst3 -- 1 --> inst5
+   	inst4 -- 2--> inst6
+   	inst3 -- 5 --> inst4
+   	inst3 -- 2 --> inst6
+   	inst1 -- 6 --> inst3
+   	inst5 -- 0 --> br
+   	inst6 -- 0 --> br
+   ```
+
+   ==问题：这种方式获得resolution time可能比真实HW上的时间长，比如old window中的依赖指令已经执行完毕，那么这里获得的完整依赖链时间就是overestimate。==
+
+3. Serialization指令的处理
+
+   串行指令的目的主要是清空Core pipeline，所以这里的delay主要是old window的"流出"时间
+
+   ```c++
+   uint64_t handle_serialization()
+   {
+     uint64_t serialization_latency = max(CriticalPath, W/D);	// critical path的长度代表了处理完old window中所有指令所需的完整时间，其中的W/D表示以dispatch_rate进行dispatch，所需的cycle数
+     latency += serialization_latency;	
+     clearOldWindow(CriticalPath+serialization_inst_exec_latency);
+     return serialization_latency;
+   }
+   ```
+
+4. Long-latency load miss的处理
+
+   对于long-latency load miss的back-end指令，因为会导致ROB Full从而不能dispatch，所以需要考虑front-end/back-end与其的overlap处理。同时，这里考虑了LSQ(load-store queue)的Queue深度，从而引入了MLP。
+
+   ```c++
+   
+   ```
 
 
 #### ROB model
