@@ -62,6 +62,10 @@ x86 inst --->
 
 ​	store uop-seqs
 
+### 针对Nehelam的uop设计
+
+![inst-class](dia/inst_class.png)
+
 ## Sniper中建模仿真的Intel Core
 
 目前，sniper建模仿真了微架构为Nehlam的Cpu微结构，主要表现在ExecutionPort的分配，和BypassNetwork的建模仿真上
@@ -109,10 +113,11 @@ void microop_model()
     uops = build_fake_uops();
     latency = uop_model->simulate(uops);
   }
+  
+  // synchronize core_time
+  synchronize();		// for some latency not calc in the uop_model
 }
 ```
-
-
 
 ### Interval model
 
@@ -247,7 +252,7 @@ void microop_model()
 
       ==问题：实际上，这种假设是有问题的，无法保证后面overlap的long-latency load的delay一定<=前面的long-latency load的delay，所以会引入误差==
 
-      如何识别indpent load，需要在某个long-latency load往后的W条指令中进行搜索对应的load指令(**这里的indepnt包括寄存器和内存地址**)
+      如何识别indepent load，需要在某个long-latency load往后的W条指令中进行搜索对应的load指令(**这里的indepent包括寄存器**)
 
       ==问题：这里的long-latency load实际只是一个代表，不一定特别指代load操作，比如float-point的div操作，如果L > W/D，一样可以认为是long-latency load，而这里的indepent load实际上还要考虑resource contention的结果，比如float-point的div如果不能是pipe处理的，且仅有一个对应的处理单元，那么多个div之间实际建立了依赖关系；这里并没有考虑这方面的问题==
 
@@ -302,7 +307,7 @@ void inteval_model(inst)
     dispatch_num = 0;
     dispatch_effective = calcDispatchEffective();		// calc dispatch rate for ILP
     
-    while (!newW->empty() && !frontend_miss && dispatch_num < dispatch_effective) {
+    while (!newW->empty() && !frontend_miss && dispatch_num++ < dispatch_effective){
       dispatch_inst = newW->getDispatchInst();
       if (dispatch_inst->miss_event && !overlap)
         latency += handle-missevent();
@@ -485,7 +490,7 @@ old-window保存了所有已经Dispatch进入ROB，等待执行或者已经执�
      - 如果uop是serilization指令，停止处理
      - 查找当前uop所有依赖的uop序列(producers)
        - 如果producer依赖当前long-latency load，则标记uop为依赖
-       - 如果producer不依赖，但是本身是long-latency miss load，则依然标记uop为依赖
+       - 如果producer不依赖当前long-latency load，但是本身是long-latency miss load，则依然标记uop为依赖 
      - 对于branch miss指令，且不依赖的指令，标记BPRED_OVERLAP
      - 对于不依赖，但是和long-latency load访问相同cache line的load指令，标记为依赖
      - 对于load指令，如果前面没有mem barrier指令，则标记为DATA_OVERLAP指令，表明MLP
@@ -531,8 +536,8 @@ void rob_model(inst)
     // for load store forwarding, remove store dependent
     // add store dependee to load dependent
     // ex: 
-    //		.... some instruction on addr calc, suppose inst1, inst2
-    //		mov [addr], 10		;store
+    //		.... some instruction on addr&data calc, suppose inst1, inst2
+    //		mov [addr], data		;store
     //		mov eax, [addr]		;load, depend on store
     // then load can forward from store, here, modify load depend as below:
     //		load depend on store ==> load depend on inst1, inst2
@@ -668,7 +673,7 @@ void rob_model(inst)
     | ------------------------- | ------------------------------------------------------------ |
     | inst->ready > core_now    | 指令ready了，但是在**未来**的时间                            |
     | hit mfence && inst->memOp | 指令是load/store指令，但是之前有mfence指令(lfence/sfence处理成mfence)，需要等待mfence结束才可以执行 |
-    | mfence指令                | 必须等到是rob_head的时候才能执行<br />==问题：在目前的sniper中实现有问题。sniper的rob_head指的是一次issue的时候第一次issue的条件，而实际硬件指的就是rob h== |
+    | mfence指令                | 必须等到是rob_head的时候才能执行<br />==问题：在目前的sniper中实现有问题。sniper的rob_head指的是一次issue的时候第一次issue的条件，而实际硬件指的就是rob head== |
     | serialization指令         | 条件同mfence指令；同时**结束本次Issue**                      |
     | store指令                 | store queue必须有空间<br />==问题：这里的实现也有问题，push store queue在真实硬件上是在dispatch的时候进行的，不是在issue的时候== |
     | load指令                  | load queue必须有空间，且没有unknown address的store指令(store的address register有依赖关系或是在未来才能计算出地址)[使能address_disambiguation]<br />==问题：push load queue也是在dispatch的时候进行的== |
