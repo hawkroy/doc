@@ -249,34 +249,54 @@ graph TD
 
 ##### CacheLine状态转换图和协议消息表
 
-| Current State            | Coherency Msg                    | Next State       | Action                                              | Dest                    |
-| ------------------------ | -------------------------------- | ---------------- | --------------------------------------------------- | ----------------------- |
-| **下行(Core->Cache)**    |                                  |                  |                                                     |                         |
-| INVALID                  | READ                             | SHARED/EXCLUSIVE | Replace,  BACK_INVAL(INVALID+WRITE-BACK Dirty Data) | Previous Level Cache    |
-|                          |                                  |                  | EVICT                                               | Next Level Component    |
-|                          |                                  |                  | READ                                                | Next Level Component    |
-| INVALID                  | READ                             | SHARED/EXCLUSIVE | No replace, READ                                    | Next Level Component    |
-| INVALID                  | READ_EX(read-modify-write)/WRITE | MODIFIED         | Replace，BACK_INVAL(INVALID+WRITE-BACK Dirty Data)  | Previous Level Cache    |
-|                          |                                  |                  | EVICT                                               | Next Level Component    |
-|                          |                                  |                  | READ_EX/WRITE                                       | Next Level Component    |
-| INVALID                  | READ_EX/WRITE                    | MODIFIED         | No replace, READ_EX/WRITE                           | Next Level Component    |
-| EXCLUSIVE                | READ                             | EXCLUSIVE        | return data                                         | N.A.                    |
-| EXCLUSIVE                | READ_EX/WRITE                    | MODIFIED         | ==READ_EX/WRITE==                                   | ==Next Level Componet== |
-| SHARED                   | READ                             | SHARED           | return data                                         | N.A.                    |
-| SHARED                   | READ_EX/WRITE                    | MODIFIED         | READ_EX/WRITE                                       | Next Level Component    |
-| MODIFIED                 | READ                             | MODIFIED         | return data                                         | N.A.                    |
-| MODIFIED                 | READ_EX/WRITE                    | MODIFIED         | return/write data                                   | N.A.                    |
-| OWNED(Not used)          |                                  |                  |                                                     |                         |
-| **下行(LLC->Directory)** |                                  |                  |                                                     |                         |
-| INVALID                  |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
-|                          |                                  |                  |                                                     |                         |
+| Current State            | Coherency Msg                    | Next State       | Action                                                       | Dest                    |
+| ------------------------ | -------------------------------- | ---------------- | ------------------------------------------------------------ | ----------------------- |
+| **下行(Core->Cache)**    |                                  |                  |                                                              |                         |
+| INVALID                  | READ                             | SHARED/EXCLUSIVE | Replace,  BACK_INVAL(INVALID+WRITE-BACK Dirty Data)          | Previous Level Cache    |
+|                          |                                  |                  | EVICT                                                        | Next Level Component    |
+|                          |                                  |                  | READ                                                         | Next Level Component    |
+| INVALID                  | READ                             | SHARED/EXCLUSIVE | No replace, READ                                             | Next Level Component    |
+| INVALID                  | READ_EX(read-modify-write)/WRITE | MODIFIED         | Replace，BACK_INVAL(INVALID+WRITE-BACK Dirty Data)           | Previous Level Cache    |
+|                          |                                  |                  | EVICT                                                        | Next Level Component    |
+|                          |                                  |                  | READ_EX/WRITE                                                | Next Level Component    |
+| INVALID                  | READ_EX/WRITE                    | MODIFIED         | No replace, READ_EX/WRITE                                    | Next Level Component    |
+| EXCLUSIVE                | READ                             | EXCLUSIVE        | return data                                                  | N.A.                    |
+| EXCLUSIVE                | READ_EX/WRITE                    | MODIFIED         | ==READ_EX/WRITE==<br />==这里的E状态遇到Write的时候仍然会发送到下一级Cache，所以这里的E等同于S状态，在整个Cache Level中实现的是MSI的协议== | ==Next Level Componet== |
+| SHARED                   | READ                             | SHARED           | return data                                                  | N.A.                    |
+| SHARED                   | READ_EX/WRITE                    | MODIFIED         | READ_EX/WRITE                                                | Next Level Component    |
+| MODIFIED                 | READ                             | MODIFIED         | return data                                                  | N.A.                    |
+| MODIFIED                 | READ_EX/WRITE                    | MODIFIED         | return/write data                                            | N.A.                    |
+| OWNED(Not used)          |                                  |                  |                                                              |                         |
+| **下行(LLC->Directory)** |                                  |                  |                                                              |                         |
+| INVALID                  | READ                             | N.A.             | SH_REQ                                                       | TAG_DIR(H)              |
+| INVALID                  | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
+| EXCLUSIVE                | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| EXCLUSIVE                | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
+| SHARED                   | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| SHARED                   | READ_EX/WRITE                    | SHARED_UPGRADING | UPGRADE_REQ                                                  | TAG_DIR(H)              |
+| MODIFIED                 | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| MODIFIED                 | READ_EX/WRITE                    | N.A.             | N.A.                                                         | N.A.                    |
+| **上行(Directory->LLC)** |                                  |                  |                                                              |                         |
+| UNCACHED                 | EX_REQ                           | MODIFIED         | EX_REP                                                       | LLC(R)                  |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
+|                          |                                  |                  |                                                              |                         |
 
 
 
