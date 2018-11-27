@@ -209,75 +209,53 @@ CacheBlockInfo：定义每个CacheLine中(一个CacheSet有way个CacheLine)保�
 
 ##### Cache WorkingFlow
 
-```mermaid
-graph TD
-	start((start))
-	done((done))
-	get_set_idx[get set index from given address]
-	way_done{all way done in given set?}
-	tag_match{addr_tag match way_tag?}
-	mark_hit[mark hit specific way]
-	move_next_way[move to next way in given set]
-	mark_miss[mark miss in given cache]
-	hit_or_miss{whether address hit or miss in cache}
-	check_cc[check cache coherency protocol]
-	cc_miss{violate cache-coherency?}
-	forward_next_level[forwarding req to next-lvl with cache-coherency msg]
-	return_data[get resp from next-lvl or hit in current cache, return data]
-	
-	start --> get_set_idx
-	get_set_idx --> way_done
-	way_done --No--> tag_match
-	tag_match --No--> move_next_way
-	move_next_way --> way_done
-	tag_match --Yes--> mark_hit
-	mark_hit --> hit_or_miss
-	way_done --Yes--> mark_miss
-	mark_miss --> hit_or_miss
-	hit_or_miss --Hit--> check_cc
-	hit_or_miss --Miss--> forward_next_level
-	check_cc --> cc_miss
-	cc_miss --Yes--> forward_next_level
-	cc_miss --No--> return_data
-	forward_next_level --> return_data
-	return_data -->done
-```
+![cache-workflow](dia/cache_workflow.png)
 
-#### Cache-Coherency的处理
+#### Cache-Coherency Protocol
 
 目前sniper中支持三种Cache-Coherency Protocol：MSI，MESI，MESIF。同时所有的Cache层级间的关系为**Inclusive**，目前<u>***不支持Exclusive和NENI模式***</u>
+
+##### 基本Cache-Coherency架构
+
+![cc-hierarchy](dia/cc_hierarchy.png)
+
+在各层Cache之间，目前Sniper使用MSI协议；在DRAM Directory Controller(Snoop Agent)可以使用MSI/MESI/MESIF等协议
+
+##### Cache MSI协议转换图
+
+
 
 ##### CacheLine状态转换图和协议消息表
 
 | Current State            | Coherency Msg                    | Next State       | Action                                                       | Dest                    |
 | ------------------------ | -------------------------------- | ---------------- | ------------------------------------------------------------ | ----------------------- |
-| **下行(Core->Cache)**    |                                  |                  |                                                              |                         |
-| INVALID                  | READ                             | SHARED/EXCLUSIVE | Replace,  BACK_INVAL(INVALID+WRITE-BACK Dirty Data)          | Previous Level Cache    |
+| **Caches**               |                                  |                  |                                                              |                         |
+| Invalid                  | READ                             | Shared/Exclusive | Replace,  BACK_INVAL(INVALID+WRITE-BACK Dirty Data)          | Previous Level Cache    |
 |                          |                                  |                  | EVICT                                                        | Next Level Component    |
 |                          |                                  |                  | READ                                                         | Next Level Component    |
-| INVALID                  | READ                             | SHARED/EXCLUSIVE | No replace, READ                                             | Next Level Component    |
-| INVALID                  | READ_EX(read-modify-write)/WRITE | MODIFIED         | Replace，BACK_INVAL(INVALID+WRITE-BACK Dirty Data)           | Previous Level Cache    |
+| Invalid                  | READ                             | Shared/Exclusive | No replace, READ                                             | Next Level Component    |
+| Invalid                  | READ_EX(read-modify-write)/WRITE | Modified         | Replace，BACK_INVAL(INVALID+WRITE-BACK Dirty Data)           | Previous Level Cache    |
 |                          |                                  |                  | EVICT                                                        | Next Level Component    |
 |                          |                                  |                  | READ_EX/WRITE                                                | Next Level Component    |
-| INVALID                  | READ_EX/WRITE                    | MODIFIED         | No replace, READ_EX/WRITE                                    | Next Level Component    |
-| EXCLUSIVE                | READ                             | EXCLUSIVE        | return data                                                  | N.A.                    |
-| EXCLUSIVE                | READ_EX/WRITE                    | MODIFIED         | ==READ_EX/WRITE==<br />==这里的E状态遇到Write的时候仍然会发送到下一级Cache，所以这里的E等同于S状态，在整个Cache Level中实现的是MSI的协议== | ==Next Level Componet== |
-| SHARED                   | READ                             | SHARED           | return data                                                  | N.A.                    |
-| SHARED                   | READ_EX/WRITE                    | MODIFIED         | READ_EX/WRITE                                                | Next Level Component    |
-| MODIFIED                 | READ                             | MODIFIED         | return data                                                  | N.A.                    |
-| MODIFIED                 | READ_EX/WRITE                    | MODIFIED         | return/write data                                            | N.A.                    |
-| OWNED(Not used)          |                                  |                  |                                                              |                         |
+| Invalid                  | READ_EX/WRITE                    | Modified         | No replace, READ_EX/WRITE                                    | Next Level Component    |
+| Exclusive                | READ                             | Exclusive        | return data                                                  | N.A.                    |
+| Exclusive                | READ_EX/WRITE                    | Modified         | ==READ_EX/WRITE==<br />==这里的E状态遇到Write的时候仍然会发送到下一级Cache，所以这里的E等同于S状态，在整个Cache Level中实现的是MSI的协议== | ==Next Level Componet== |
+| Shared                   | READ                             | Shared           | return data                                                  | N.A.                    |
+| Shared                   | READ_EX/WRITE                    | Modified         | READ_EX/WRITE                                                | Next Level Component    |
+| Modified                 | READ                             | Modified         | return data                                                  | N.A.                    |
+| Modified                 | READ_EX/WRITE                    | Modified         | return/write data                                            | N.A.                    |
+| Owned(Not used)          |                                  |                  |                                                              |                         |
 | **下行(LLC->Directory)** |                                  |                  |                                                              |                         |
-| INVALID                  | READ                             | N.A.             | SH_REQ                                                       | TAG_DIR(H)              |
-| INVALID                  | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
-| EXCLUSIVE                | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| EXCLUSIVE                | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
-| SHARED                   | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| SHARED                   | READ_EX/WRITE                    | SHARED_UPGRADING | UPGRADE_REQ                                                  | TAG_DIR(H)              |
-| MODIFIED                 | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| MODIFIED                 | READ_EX/WRITE                    | N.A.             | N.A.                                                         | N.A.                    |
+| Invalid                  | READ                             | N.A.             | SH_REQ                                                       | TAG_DIR(H)              |
+| Invalid                  | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
+| Exclusive                | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| Exclusive                | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
+| Shared                   | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| Shared                   | READ_EX/WRITE                    | SHARED_UPGRADING | UPGRADE_REQ                                                  | TAG_DIR(H)              |
+| Modified                 | READ                             | N.A.             | N.A.                                                         | N.A.                    |
+| Modified                 | READ_EX/WRITE                    | N.A.             | N.A.                                                         | N.A.                    |
 | **上行(Directory->LLC)** |                                  |                  |                                                              |                         |
-| UNCACHED                 | EX_REQ                           | MODIFIED         | EX_REP                                                       | LLC(R)                  |
+| Uncached                 | EX_REQ                           | Modified         | EX_REP                                                       | LLC(R)                  |
 |                          |                                  |                  |                                                              |                         |
 |                          |                                  |                  |                                                              |                         |
 |                          |                                  |                  |                                                              |                         |
@@ -297,8 +275,6 @@ graph TD
 |                          |                                  |                  |                                                              |                         |
 |                          |                                  |                  |                                                              |                         |
 |                          |                                  |                  |                                                              |                         |
-
-
 
 #### DRAM Directory Controller (Snoop Agent)
 
