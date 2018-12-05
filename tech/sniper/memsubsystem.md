@@ -184,9 +184,9 @@ DRAMC的home address由哪几个Core含有DRAMC决定
 
 ------
 
-### Cache结构
+### Cache Hierarchy
 
-#### Cache的基本结构
+#### Cache Controller结构
 
 ![cache-class](dia/cache_class.png)
 
@@ -211,11 +211,11 @@ CacheBlockInfo：定义每个CacheLine中(一个CacheSet有way个CacheLine)保�
 
 ![cache-workflow](dia/cache_workflow.png)
 
-#### Cache-Coherency Protocol
+#### Cache Coherency Protocol
 
 目前sniper中支持三种Cache-Coherency Protocol：MSI，MESI，MESIF。同时所有的Cache层级间的关系为**Inclusive**，目前<u>***不支持Exclusive和NENI模式***</u>
 
-##### 基本Cache-Coherency架构
+##### Cache Coherency架构
 
 ![cc-hierarchy](dia/cc_hierarchy.png)
 
@@ -223,86 +223,321 @@ CacheBlockInfo：定义每个CacheLine中(一个CacheSet有way个CacheLine)保�
 
 ##### Cache MSI协议转换图
 
+**协议消息定义**
 
+| Message        | Source              | Description                                                  |
+| -------------- | ------------------- | ------------------------------------------------------------ |
+| PR_Read        | Core                | 处理器发出的读请求                                           |
+| PR_ReadEx      | Core                | 处理器发出的exchange(Read-Modify-Write)请求                  |
+| PR_Write       | Core                | 处理器发出的写请求                                           |
+| CC_Invalid     | next level Cache    | 下层Cache发送到上层Cache的Query Invalid请求(可以带Data)， Coherency到I |
+| CC_Share       | next level Cache    | 下层Cache发送到上层Cache的Query请求(可以带Data)，Coherency到S |
+| CA_Upgradereq  | LLC                 | LLC发送到Home Direcotry的upgrade_to_ex的请求，用于Query invalid掉share的cache line |
+| DIR_Upgraderep | Home dram directory | Home Direcotry发送到sharer LLC的upgrade_to_ex的响应          |
+| DIR_Flushreq   | Home dram directory | Home Direcotry发送到Owner LLC的Query Invalid请求(带Data)     |
+| CA_Flushrep    | LLC                 | LLC发送到Home Direcotry的Flush响应(带Data)                   |
+| DIR_Invreq     | Home dram directory | Home Direcotry发送到Sharer LLC的Query Invalid请求(无Data)    |
+| CA_Invrep      | LLC                 | LLC发送到Home Direcotry的Invalid响应(无Data)                 |
+| DIR_Wbreq      | Home dram directory | Home Direcotry发送到Owner LLC的Query请求(可以带Data)         |
+| CA_Wbrep       | LLC                 | LLC发送到Home Direcotry的Writeback相应(可以带Data)           |
 
-##### CacheLine状态转换图和协议消息表
+**Cache Controller状态机**
 
-| Current State            | Coherency Msg                    | Next State       | Action                                                       | Dest                    |
-| ------------------------ | -------------------------------- | ---------------- | ------------------------------------------------------------ | ----------------------- |
-| **Caches**               |                                  |                  |                                                              |                         |
-| Invalid                  | READ                             | Shared/Exclusive | Replace,  BACK_INVAL(INVALID+WRITE-BACK Dirty Data)          | Previous Level Cache    |
-|                          |                                  |                  | EVICT                                                        | Next Level Component    |
-|                          |                                  |                  | READ                                                         | Next Level Component    |
-| Invalid                  | READ                             | Shared/Exclusive | No replace, READ                                             | Next Level Component    |
-| Invalid                  | READ_EX(read-modify-write)/WRITE | Modified         | Replace，BACK_INVAL(INVALID+WRITE-BACK Dirty Data)           | Previous Level Cache    |
-|                          |                                  |                  | EVICT                                                        | Next Level Component    |
-|                          |                                  |                  | READ_EX/WRITE                                                | Next Level Component    |
-| Invalid                  | READ_EX/WRITE                    | Modified         | No replace, READ_EX/WRITE                                    | Next Level Component    |
-| Exclusive                | READ                             | Exclusive        | return data                                                  | N.A.                    |
-| Exclusive                | READ_EX/WRITE                    | Modified         | ==READ_EX/WRITE==<br />==这里的E状态遇到Write的时候仍然会发送到下一级Cache，所以这里的E等同于S状态，在整个Cache Level中实现的是MSI的协议== | ==Next Level Componet== |
-| Shared                   | READ                             | Shared           | return data                                                  | N.A.                    |
-| Shared                   | READ_EX/WRITE                    | Modified         | READ_EX/WRITE                                                | Next Level Component    |
-| Modified                 | READ                             | Modified         | return data                                                  | N.A.                    |
-| Modified                 | READ_EX/WRITE                    | Modified         | return/write data                                            | N.A.                    |
-| Owned(Not used)          |                                  |                  |                                                              |                         |
-| **下行(LLC->Directory)** |                                  |                  |                                                              |                         |
-| Invalid                  | READ                             | N.A.             | SH_REQ                                                       | TAG_DIR(H)              |
-| Invalid                  | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
-| Exclusive                | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| Exclusive                | READ_EX/WRITE                    | N.A.             | EX_REQ                                                       | TAG_DIR(H)              |
-| Shared                   | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| Shared                   | READ_EX/WRITE                    | SHARED_UPGRADING | UPGRADE_REQ                                                  | TAG_DIR(H)              |
-| Modified                 | READ                             | N.A.             | N.A.                                                         | N.A.                    |
-| Modified                 | READ_EX/WRITE                    | N.A.             | N.A.                                                         | N.A.                    |
-| **上行(Directory->LLC)** |                                  |                  |                                                              |                         |
-| Uncached                 | EX_REQ                           | Modified         | EX_REP                                                       | LLC(R)                  |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
-|                          |                                  |                  |                                                              |                         |
+![cache-msi-protocol](dia/cache_msi_protocol.png)
 
-#### DRAM Directory Controller (Snoop Agent)
+==问题:对于Sniper实现的Cache Controller的协议状态机，可以看到是一个MSI的实现协议(在LLC的Exclusive处理上与MSI有细微的差别，和实际的MESI处理上主要在于Exclusive状态下收到Write请求，Sniper会继续传递Write请求，而MESI会slient将E->M)==
+
+==疑问: Share_upgrading的隐藏状态下，为什么会收到WBreq的请求；同样会收到Invreq和Flushreq吗？==
+
+##### DRAM Directory Controller(Snoop Agent)
+
+DRAM Directory Controller类似于一个Cache(实际上组织结构上与Cache相似，但是不一定存储Data)。在sniper的实现中，DRAM Directory Controller可以位于DRAM侧，也可以位于LLC侧(LLC侧实际上LLC作为一个Snoop Agent存在，并且带有存储Data功能)
+
+**sniper中DRAM Direcotry Controller组织方式**
+
+![dram-controller](dia/directory_controller.png)
+
+DirectoryBlockInfo只存储Cache Coherency状态，目前包括的主要是MESI四个基础状态 {Intel的MESIF协议在Sniper中通过BlockInfo下的forwarder_id表示，只有S状态下会设置这个域}；sharers的信息存储在DirectorySharers的类数据结构中
+
+![directory-protocol](dia/directory_protocol.png)
 
 #### Cache的Performance model
 
+Cache的Performance model用于simulate Cache的tag/data的访问，目前提供两种基本的performance model
+
+- Sequential model： tag和data的访问是串行的，通常使用在高层级的Cache中(比如LLC)
+- Parallel model：tag和data的访问是并行的，取决于data latency(sniper设计)，通常使用在低层级的Cache中(比如L1)
+
+![cache-perf-model](dia/cache_performance_model.png)
+
 #### Cache Prefetch
 
+**Prefetch调用时机**
+
+- 每次Core memory访问后miss或是之前的prefetch hit {如果enable} 情况下，进行prefetch training，并进行prefetch
+- 在每层cache都可以含有prefetch module，如果当前memory访问miss或是prefetch hit{如果enable}，进行prefetch training
+- 在非lock访问下，进行prefetch调用(如果prefetch成功training，则进行prefetch)
+- prefetch发送的request都是PR_Read，即共享读，每次只发送一个prefetch请求
+
+**Prefetch在Cache中的体现**
+
+- CacheBlock中，存在额外的option域，定义CacheBlock的特殊属性{WARMUP，PREFETCH}
+- 当某次memory访问是prefetch trigger的，则在option上标记为PREFETCH
+
+![cache-prefetch](dia/cache_prefetch.png)
+
+**Sniper支持的Prefetch类型**
+
+- None
+
+  不存在prefetcher
+
+- Simple-Prefetch
+
+  基于简单的stride机制的prefetch
+
+  ![simple-prefetch](dia/simple_prefetch.png)
+
+- Ghb-Prefetch
+
+  一种基于address offset进行组织和管理的复杂prefetch算法。原理是根据历史上针对于相同的address offset的历史访问序列情况预测后面的访问序列情况
+
+  ![ghb-prefetch](dia/ghb_prefetch.png)
+
 #### NUCA Cache
+
+Nuca Cache是访问时间不同的Cache，通常用在slice化的LLC中，比如Intel的Ring/Mesh网络中
+
+**NUCA Cache结构**
+
+![nuca-cache](dia/nuca_cache.png)
+
+#### Cache System的性能仿真
+
+对于sniper的仿真而言，cache system的性能主要取决于两个方面：
+
+- 某级Cache内部的pipeline访问，包括tag/data pipeline的访问时延；sniper不仿真对于pipeline的arbitration。pipeline的访问通过固定时延进行建模
+- 当本级Cache miss后，request占用mshr(FillQ)的时间，这个时间反映了底层的memory系统对于request的处理速度。mshr通过contention model进行建模
 
 ------
 
 ### NoC的互联模型(network)
 
+NoC部分用于仿真片上网络的路由部分
+
+![network](dia/network.png)
+
+Sniper使用多线程的方式仿真NoC的发送/接收。每个Core的Network接口都会创建一个对应的SimThread的仿真线程用于模拟当前Core的Network接口的接收过程
+
+当某个Core要发送request到Network中的时候，首先通过NetworkModel的各类网络模型决定当前request要转发的节点，然后通过Transport接口注入到对应network的Transport中，由Network receive逻辑决定是转发还是由当前Network的MemoryManager来处理当前的request
+
+```mermaid
+sequenceDiagram
+	participant mmanger_s as MemoryManager-S
+	participant net_s as Network-S
+	participant model as NetworkModel
+	participant transp_s as TransportNode-S
+	participant transp_r as TransportNode-R
+	participant net_r as Network-R
+	participant mmanger_r as MemoryManager-R
+	
+	mmanger_s->>+net_s: send request to NoC network
+	net_s->>+model: decide request routine target
+	model-->>-net_s: return target node
+	net_s->>+transp_s: send request to dest by own transport
+	transp_s-->>-net_s: done
+	net_s-->>-mmanger_s: done
+	loop resp recv
+		mmanger_s->>mmanger_s: loop wait
+	end
+	loop income?
+		net_r->>net_r: wait loop
+	end
+	transp_s->>+transp_r: route request to target node
+	transp_r->>+net_r: notify target network handle it
+	alt target is self
+		net_r->>+mmanger_r: handle request
+		mmanger_r-->>-net_r: response
+		net_r-->>-transp_r: reponse
+		transp_r-->>-transp_s: response
+	else not self
+		net_r->>net_r: forward request
+	end
+```
+
 #### Bus 模型
 
+简单的NoC互联模型，所有的Core都挂在一个独享的全局总线上
+
+![bus-network](dia/bus_network.png)
+
+#### eMesh_hop_by_hop模型
+
+eMesh_hop_by_hop用于描述多跳的NoC网络，包括line/ring/mesh等形态的NoC
+
+![emesh_hopbyhop-network](dia/emesh_hopbyhop_network.png)
+
+对于line/ring来说，不存在up/bottom的路由路径
+
 #### 其他
+
+TBD
 
 ------
 
 ### DRAMC模型
 
+DRAMC的部分主要有两部分组成，DRAM-Cache(如果enable)和DRAM-Controller
+
+![dram-struc](dia/dram_struc.png)
+
 #### DRAMC Cache
 
-#### DRAMC的时序模型
+等同于DRAM端的一个简单Cache，仿真方式基本与NUCA Cache一致
+
+![dram-cache](dia/dram_cache.png)
+
+#### DRAM Controller
+
+DRAM Controller用于仿真控制DRAM时序的Controller模块。这里的实现是高度抽象的，没有具体DRAM时序的仿真，而是使用bandwidth limiter进行替代
+
+![dram-controller](dia/dram_controller.png)
+
+DRAM的performance model主要分为3个基本类型
+
+- Constant Model
+  1. DRAMC内部的read/write调度时延通过queue model进行仿真
+  2. DRAMC和DRAM Device间的接口时序通过bandwidth limiter仿真
+  3. DRAM Device上的访问时延通过固定时延仿真
+- Normal Model
+  1. DRAMC内部的read/write调度时延通过queue model进行仿真
+  2. DRAMC和DRAM Device间的接口时序通过bandwidth limiter仿真
+  3. DRAM Device上的访问时延通过正态分布概率模型时延仿真
+- Read/Write Model
+  1. DRAMC内部的read/write调度时延通过分别建立read、write的queue model分别计算read/write的调度时延进行仿真
+  2. DRAMC和DRAM Device间的接口时序通过bandwidth limiter仿真
+  3. DRAM Device上的访问时延通过固定时延仿真
 
 ------
 
 ### ShMemPerfModel时序模型
+
+#### 时序仿真的方法
+
+对于sniper而言，并不单独trace每一条指令或是指令的执行过程，而是先执行完一定的指令后，计算每条指令的执行延时，然后再决定当前Core的时间需要迭代的时间
+
+**sniper VS. gem5**
+
+|              | sniper                                                       | gem5                                                         |
+| ------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| 执行方式     | function first<br />运行function model为主，然后统计每条指令的执行时间，在选择当前Core的时间步进长度 | execution driven<br />追踪每条指令的完整执行过程，在pipeline中的所有状态，模拟一条指令的完整执行周期 |
+| 硬件建模方式 | 抽象出硬件中最为主要的资源竞争部分进行contention model的建模，其他部分都以固定延时进行替代 | 精细建模pipeline的各个阶段，包括指令可能处于的中间状态       |
+| 支持投机     | 不支持                                                       | 支持                                                         |
+| 仿真角度     | 站在执行的指令角度，统计时间                                 | 站在仿真时间角度，模拟指令的可能状态                         |
+
+**sniper仿真流程**
+
+```c++
+void sniper_flow()
+{
+  uint64_t global_time = 0;
+  uint64_t next_cycle = 0;
+  vector<request> func_result;
+  
+  while (!sim_end) {
+    // get latest function execution flow
+    func_result.append(do_function_model());
+    
+    // simulate a batch of requests, calc time step
+    uint64_t cur_cycle = next_cycle;
+    while (!meet_break_event) {
+      reqeust req = func_result.pop_front();
+      latency = req->execution();
+      next_cycle = compute_nextcycle(next_cycle, latency);
+    }
+    
+    // update global time based on time step
+    global_time += (next_cycle-cur_cycle);
+  }
+}
+```
+
+sniper中对于时序计算的分类
+
+sniper是多线程仿真程序；对于一个Core来说，系统目前主要划分为两个主要的线程
+
+- User_Thread：用于仿真Core部分的所有时间推演计算
+- Sim_Thread：用于仿真Network部分的所有时间推演计算
+
+![sniper-timing-calc](dia/sniper_timing_calc.png)
+
+上图表明一个request的访问延时统计，一次request访问相当于一次函数调用，完成所有Core/Uncore部分的访问，并统计所有execution-path上的时延
+
+**sniper目前统计的执行时延**
+
+- Core：fetch-latency, dispatch-latency, execution-latency{对于ld/st指令，包括core/uncore部分的所有时延}
+- cache: tag/data-pipe access latency
+- dram directory controller: tag access latency, coherency sync latencies
+- network: network queue latency, network transport latency
+- DRAM: drame queue latency, dram bus latency, dram device latency
+
+#### 时序仿真的基础组件
+
+sniper中用于支持时序仿真的基础组件是queue model和contention model；queue model用于描述存在资源竞争的系统中，各个独立达到的request等待服务的时间；contention model直接描述对同一个资源竞争导致的服务时间延迟
+
+**Contention Model**
+
+描述某一类的资源的占用情况的模型，通常是硬件中的Queue资源
+
+```c++
+struct {
+  bool occupy;		// entry occupy or not
+  IntPtr tag;			// entry key, used for some search case
+  time_t complete_time;		// entry complete time
+} resource[N];
+
+time_t computeDelayTime(IntPtr req, time_t visit_time, time_t process_time)
+{
+  time_t delay = 0;
+  if (has_free_slot()) {
+    // free space, no contention
+    resource[free_idx] = {req, visit_time+process_time};
+  }
+  else {
+    min_idx = find_nearest_complete_request(resource);
+    if （visit_time < resource[min_idx].complete_time) {
+      // no more space, and should wait
+      visit_time = resource[min_idx].complete_time;
+      delay = resource[min_idx].complete_time - visit_time;
+    }
+    // update resource table
+    resource[min_idx] = {req, visit_time+process_time};
+  }
+  return delay;
+}
+```
+
+**Queue Model**
+
+- queue_model_base
+
+  简单的queue model，通过计算目前queue中已经缓存的request的完成时间的均值(算术、几何或是中位数)来获得当前request的可能开始服务时间，从而计算delay
+
+- queue_model_history_list
+
+  将整个仿真时间切割为若干空闲时间间隔，并将其list起来。如果某个请求的达到时间没有落在某个空闲空间上，说明可能有别的请求正在服务，则当前请求推迟到下一个空闲间隔才能执行
+
+- queue_model_contention
+
+  结合contention model，设计的queue model，服务的等待时间完全由contention model计算出来时间决定
+
+- queue_model_mg1
+
+  利用排队论中的M/G/1模型[系统中的请求到达服从独立、同分布的概率模型，请求的服务时间满足互相独立分布的概率模型，只有一个服务者]，则该模型支持下，每个请求的平均等待时间为
+
+  $W = \frac{\lambda\overline{X}^2}{2(1-\rho)}$
+
+  其中，$\lambda$表示平均到达率，$\overline{X}^2$表示平均服务时间平方，$\rho$表示系统的服务效率
 
 ------
 
