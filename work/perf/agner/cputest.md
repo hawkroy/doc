@@ -2,7 +2,7 @@
 
 ### Overall structure
 
-![structure](dia/cputest_structure.png)
+![structure](../dia/cputest_structure.png)
 
 ### Driver & Test-Library interface
 
@@ -216,7 +216,5 @@ TestLoop:
   - 添加CHX002的CPUID相关信息
     - library本身的修改
     - cpugetinfo.cpp的应用程序
-
-### 不同测试分类分析
 
 
