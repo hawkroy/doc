@@ -217,4 +217,10 @@ TestLoop:
     - library本身的修改
     - cpugetinfo.cpp的应用程序
 
+### 测试时的需要注意的问题
 
+- 对于load/store instruction不能通过SW的方式测量出各自独立的latency，但是uop和throughput等值可以准确测试出来。所以：
+  - 形如mov r, [m]形式的指令没有latency这栏
+  - 形如mov [m], i/r形式的指令latency这栏中表明的latency实际上是store-load forwarding的latency，并不是真正的store/load的latency
+  - 形如mov r, i/r形式的指令的latency是最为准确的，当然这里还有需要考虑的是register operands的forwarding问题
+- 对于涉及到两类不同寄存器格式转换的指令，和load/store指令类似，无法准确测试出一条指令的latency。对于处理寄存器类型A/B的指令，可以使用A->B->A等形式进行间接测试，获得A->B->A形式的latency，从而猜测A->B，B->A的latency
