@@ -135,6 +135,8 @@ HASWELL
 
 模板代码实现结构
 
+TBD
+
 ```assembly
 /* memmove/memcpy/mempcpy is implemented as:
    1. Use overlapping load and store to avoid branch.
@@ -175,7 +177,17 @@ CHX002 Intel_id
 
 __memcpy_sse3使用的代码模板如下：
 
+TBD
+
 ------
+
+GCC/ICC编译的openmp程序的结构分析
+
+TBD
+
+------
+
+## glibc memcpy的性能测试结果
 
 对于GCC O2优化下编译的stream copy程序，其主要汇编代码如下：
 
@@ -189,6 +201,8 @@ LL: movsd (%r15, %rax, 8), %xmm0
 	  jne LL
 ```
 
+更具体的数据请参考[memcpy_test.xlsx](./memcpy_test.xlsx)
+
 1. Case-1 不进行memcpy的动作，单纯测试循环的差别
 
    |          | CHX002                         | INTEL                          |
@@ -198,5 +212,72 @@ LL: movsd (%r15, %rax, 8), %xmm0
 
    可以看到，在非openmp的方式下，CHX002没有使用macro-fusion，导致uop个数与指令个数相同
 
-2. 
+2. Case-2 进行基于不同数组大小的stream memcpy测试
+
+   统计不同Core在不同Cache level hit情况下的throughput情况
+
+   测试在开启prefetch的情况下进行
+
+   |               | Intel Haswell 2.7GHz | CHX002 2.7GHz |
+   | ------------- | -------------------- | ------------- |
+   | L1 Cache Hit  | 40.70GB/s            | 25.78GB/s     |
+   | L2 Cache Hit  | 32.01GB/s            | N/A           |
+   | LLC Cache Hit | 25.64GB/s            | 15.29GB/s     |
+   | DRAM Hit      | 12.42GB/s            | 9.04GB/s      |
+
+3. Case-3根据不同的数组大小测试各级Cache的latency
+
+   测试在关闭prefetch的情况下进行
+
+   |               | Intel Haswell 2.7GHz | CHX002 2.7GHz |
+   | ------------- | -------------------- | ------------- |
+   | L1 Cache Hit  | ~4                   | 4             |
+   | L2 Cache Hit  | 12-4=8               | N/A           |
+   | LLC Cache Hit | ~40-12-4=24          | 34-2*4=26     |
+   | DRAM Hit      | \~130-\~215          | \~225-\~300   |
+
+4. TBD
+
+------
+
+## memcpy在sniper中的模拟仿真
+
+整个仿真基于sniper中的rob_performance_model进行仿真，主要添加macro-fusion、port-binding、LSQ的模拟等功能。在实际仿真测试过程中，发现CHX002的前端设计存在瓶颈，在包含macro-fusion的情况下(3条x86指令对应2条uop)，前端无法达到最大的throughput。所以必须重新设计sniper中的performance model来进行前端的模拟。
+
+原始的sniper中rob_performance_model的实现
+
+```mermaid
+sequenceDiagram
+	pin ->> uop_model: trace x86 insts
+	uop_model ->> backend: push x86 insts to shadow ROB
+	note over uop_model,backend: assume frontend maximum
+	activate backend
+	loop lack x86 insts
+		backend ->> backend: simulate dispatch/exec/retire
+	end
+	backend -->> uop_model: passed simulation time
+	deactivate backend
+```
+
+对于这种实现方法，始终认为backend是贡献性能的瓶颈，而前端总是可以满足backend的最大的指令throughput的需求，在这里指dispatch_width
+
+而对于CHX002来说，无法满足这个假设条件，所以需要重新设计一个新的performance model。这个是预想的performance model的工作流程
+
+```mermaid
+sequenceDiagram
+	pin ->> zx_model : trace x86 insts
+	zx_model ->> frontend: push x86 inst
+	activate frontend
+	frontend ->> frontend: simulate iCACHE/macro-fusion, FIQ
+	frontend ->> backend: push uop to backend
+  deactivate frontend
+  frontend -->> zx_model: frontend simulation time
+  activate backend
+  backend ->> backend: simulate dispatch/exec/retire
+  deactivate backend
+  backend -->> zx_model: backend simulation time
+  zx_model -->> zx_model: select min value {frontend/backend} time
+```
+
+这样设计的方式，会增加仿真时的运行时开销，因为增加一个frontend的仿真，原来的sniper设计只需要把ROB填满，然后循环仿真backend即可；按照目前的设计，则必须每来一条x86都进行一次仿真，只有当frontend的instruction_queue(FIQ)满了之后，才能进行循环仿真
 
