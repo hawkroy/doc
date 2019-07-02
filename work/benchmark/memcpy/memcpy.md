@@ -7,7 +7,7 @@
 - OS: Ubuntu 18.04
 - glic: 2.27
 
-glic memcpy代码分析
+glibc memcpy代码分析
 
 在glibc的2.27的实现中，对于memcpy的函数实现，glibc无论在动态链接还是静态链接的情况下，都采用了一种ifunc的机制进行处理。ifunc机制的引入主要是为了针对特定的硬件平台提供针对该平台的特定优化版本。
 
@@ -242,6 +242,8 @@ LL: movsd (%r15, %rax, 8), %xmm0
 
 ## memcpy在sniper中的模拟仿真
 
+### Core Pipeline的调整
+
 整个仿真基于sniper中的rob_performance_model进行仿真，主要添加macro-fusion、port-binding、LSQ的模拟等功能。在实际仿真测试过程中，发现CHX002的前端设计存在瓶颈，在包含macro-fusion的情况下(3条x86指令对应2条uop)，前端无法达到最大的throughput。所以必须重新设计sniper中的performance model来进行前端的模拟。
 
 原始的sniper中rob_performance_model的实现
@@ -280,4 +282,144 @@ sequenceDiagram
 ```
 
 这样设计的方式，会增加仿真时的运行时开销，因为增加一个frontend的仿真，原来的sniper设计只需要把ROB填满，然后循环仿真backend即可；按照目前的设计，则必须每来一条x86都进行一次仿真，只有当frontend的instruction_queue(FIQ)满了之后，才能进行循环仿真
+
+zx_model的工作流程
+
+```c++
+void handleInstruction(DynamicInstruction *inst)
+{
+  SubsecondTime latency = ZERO;
+  
+  // push x86 inst to frontend inst_queue
+  frontend.push_x86(inst); 
+  
+  // start simulation
+  while (true) {
+    // no enough x86 to simulate
+    if (frontend.needMore())
+      break;
+    
+    // update core simulation time to current cycle
+    updateCoreTime();
+    
+    frontend.execute();
+    backend.execute(simulate_instruction);
+    
+    // update statistics counter
+    instruction_count += simulate_instruction;
+  }
+}
+```
+
+frontend的工作流程
+
+```c++
+SubsecondTime execute(DynamicInstruction *inst)
+{
+  // ------simulate fetch
+  if (!in_wrong_path) {
+    // simulate x86 insts not in FIQ
+    while (fetch_ptr < inst_queue.size()) {
+      DynamicInstruction *x86 = inst_queue.at(fetch_ptr);
+      // simulate fetch&BPU and return fetch latency
+      need_break = simFetch(x86, latency);
+      
+      // fetch interrupt instruction stream, then wait for latency
+      if (need_break) {
+        register_next(latency);
+        break;
+      }
+      fetch_ptr++;
+    }
+  }
+  
+  // ------simulate decode
+  num_to_decode, latency = scan_fiq();		// scan FIQ to find ready x86 to decode
+  																				// not more than decodeWidth
+  // decode, including macro-fusion
+  // each decode simulate will from slot#0
+  decode(num_to_decode);
+  
+  // current cycle simulate done, wait for next decode phase
+  register_next(latency);
+}
+```
+
+对于frontend的仿真，需要考虑如下几个问题
+
+1. 对于frontend来说，instruction queue是最为主要提供performance的queue，所以主要建模instruction queue
+2. 因为frontend是in-order的，所以icache miss，BPU mispredict等penalty都是会直接体现在instruction queue的decode latency上的
+3. 当ROB满的时候，因为instruction queue还可以cover一部分的frontend的latency，所以ROB满的时候，instruction queue还可以进入指令，访问icache， BPU predict等。所以，对于fetch来说可以单独注册fetch的处理latency，而不是仅仅进行latency的仿真，等到实际decode的时候采取访问icache，从而造成model访问icache的时间可能延后很多(在ROB满的情况)
+
+backend的工作流程
+
+```c++
+SubsecondTime execute(void)
+{
+	// split ROB alloc & rename logic
+  // simulate Dispatch/Exec/Commit stage
+  // follow current sniper's ROB_model design
+}
+```
+
+### MOB的调整
+
+原始ROB_performance model中，对于MOB的模拟相对比较简单，只考虑了访存latency对于ld/st queue的占用时间，但是MOB中的ld/st queue的占用时间处理和实际的处理器并不一致。
+
+实际处理器的ld/st queue的流程
+
+1. rename stage --- 进行ld/st queue的entry分配，如果这里分配不成功，则uop只能发送到ROB中，但是无法进入RS； 同时，rename stage会根据memory alias table记录的情况检查ld/st之间的依赖关系，如果两者有依赖关系，那么直接建立dependency，否则，在执行的过程中，可能会有ld bypass st的情况，这种情况下，ld需要进行replay (==问题：这种replay，在sniper的结构中是否可以模拟出来？==)
+2. schedule stage --- 当ld/st指令的操作数都ready之后，ld/st通过预先分配好的ld/st 的RS-port发送到MOB的pipeline中进行执行(==需要区分出来sta、std两类不同的store uop==)。如果st执行的时候，发现有个new ld已经执行完毕，那么这笔ld需要进行replay。同时，在此执行过程中，会访问TLB/PAGEWALKER/DCACHE等硬件，并设置不同的执行latency。对于store来说，执行仅仅是进行RFO的操作，并不会把data写入到DCACHE中，而是先写入到st queue的store buffer中
+3. complete stage --- ld/st执行执行完毕后，wakeup dependent的执行
+4. retire stage --- 对于ld/st来说，只有当ROB中的ld/st uop retire之后，对应的ld/st queue中的entry才会被释放掉；特别地，对于st来说，这时才会把data写入到DCACHE中，并修改MESI为M (保证store是program-order)。[==对于多核系统来说，这个特性显得非常重要，因为当某个core的st已经complete，但是没有retire的时候，是会被另外core给snoop，从而进行replay的；这个是否可以在sniper中建模，需要认真评估。对于单核系统，MESI协议的变化时机显得并不是特别重要，当然对于因为evict引起的st replay在单核上依然会出现==]
+
+Sniper中ld/st queue的流程
+
+1. rename stage --- 不进行任何的处理
+2. schedule stage --- 指令操作ready的情况下，检查ld/st queue的分配情况，在此时根据ld/st queue的分配情况决定是否可以issue
+3. compelete stage --- wakeup dependent的执行，释放ld/st queue的分配
+4. retire stage --- 没有处理，所有的MESI状态都在schedule那个时刻的调用决定了
+
+Sniper仿真的失真分析
+
+- sniper的MOB并没有按照HW的实际的时间点来进行占用、释放。这会导致如下的问题：Sniper对于MOB的占用更理想，从而会加速后续指令的dispatch速度，从而影响到RS-port的分发情况
+- 没有区分sta/std的操作，导致port的占用不符合实际的HW情况
+- 没有retire store的操作，MESI的修改的时机与HW不一致(==是否修改需要评估==)，这个对于单核memcpy的分析无影响
+
+计划修改的sniper MOB行为
+
+- 添加sta/std的micro-fusion的处理。通常，需要将有store行为的x86分为两个uop(但是占用同一个uop entry)，sta/std；但是对于CHX002较为特殊，没有特定的std uop，所有的std指令被隐含在execution的操作上
+- 修改MOB中的ld/st的分配和释放机制，目前可以简单的把RFO操作等同于store操作，只是store queue的释放调整到retire之后，这样做不符合MESI的变化，但是对于单核问题研究无影响
+
+关于micro-fusion的处理
+
+sniper的调度基于ROB进行，对于micro-fusion的uop，只占用一个ROB entry，而调度的实体有2个sta/std。在进行instruction decoder的时候，可以直接区分sta/std uop，在进入backend处理时，需要考虑如下
+
+- 分配ROB的entry是实际为1
+- 进行RS dispatch和schedule的时候，两个占用同一个entry的uop需要分别考虑
+- 执行的时候，两个uop分别考虑
+- commit时，两者都done之后，进行commit
+
+micro-fusion的仿真方案
+
+​	复用当前的robEntry的仿真结构，每个micro-fusion的指令占用N个robEntry，但是仿真时，名义rob个数为1，这样所有的仿真算法和结构不需要大的修改，对于Backend来说，需要作如下修改：
+
+- allocate rob的时候，分配实际的robEntry，但是名义只有一个rob占用
+- dispatch阶段，对于micro-fusion的指令一起考虑，算所一次dispatch counter
+- commit阶段，只有micro-fusion的指令全部完成，才可以commit，否则不能commit
+
+临时的修改
+
+- microuop对于store指令分开为sta/std，以sta为主
+- dynamicMicroOp同microop的处理方式
+- 对于上述两个结构，有些info需要同时设置到micro-fusion的多个uop中
+
+==后续，需要大幅调整当前sniper中的uop等结构设计==
+
+关于MOB的修改
+
+- 为每个robEntry添加一个ld/st index，用于指名分配的ld/st单元index，ld/st的分配放入到dispatch stage
+- 所有的ld/st的操作全部放入到MOB中，对于memory barrier的指令同样放入到里面
+- 对于ld/st来说，entry的释放由指令在ROB中commit的时间点决定，不在像目前的sniper中执行完毕后立刻释放
+- 对于store来说，commit之后执行写回动作
 
