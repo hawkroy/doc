@@ -11,6 +11,16 @@ Markdown
 ### subject3
 .....
 
+
+
+使用上、下标
+
+直接使用HTML的标记方法
+
+上标 <sup>上标</sup>
+
+下标 <sub>下标</sub>
+
 # cite
 > this is citeration
 
