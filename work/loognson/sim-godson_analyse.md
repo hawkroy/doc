@@ -25,11 +25,11 @@
 
 - 龙芯2A处理器参数
 
-  ![loongson-2A规格](dia/loongson-2A规格.png)
+  ![loongson-2A_config](dia/loongson-2A_config.png)
 
 - sim-godson处理器配置参数
 
-  ![sim-godson配置](dia/sim-godson配置.png)
+  ![sim-godson_config](dia/sim-godson_config.png)
 
 从上面两张龙芯实际芯片和模拟器的配置参数来看，两者在配置上几乎一致，除了一些非常细节的微架构参数(这些参数在介绍处理器微架构时会更多说明)；最大的不同在***主流水线的级数***：实际芯片-9级，模拟器-7级，实际代码中看到实际只有6级，这里的差别会在介绍处理器微架构时进行重点说明。
 

@@ -1,3 +1,5 @@
+// vim: set fileencodings=cp936 :
+
 1. memory指令一次可以读取的最大数据长度，get_bytemask函数
 2. 内部指令的格式结构
 3. 关于missq的状态转换还需要关心下NoC上面的home_enter那条路径
