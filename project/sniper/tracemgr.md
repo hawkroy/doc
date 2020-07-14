@@ -1,2 +1,0 @@
-# TraceManager & TraceThread
-

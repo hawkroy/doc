@@ -1,3 +1,5 @@
+[TOC]
+
 # IPC Tool Design Spec
 
 ## 目标和使用范围
