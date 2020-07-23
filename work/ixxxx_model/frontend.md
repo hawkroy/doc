@@ -169,26 +169,147 @@ Frontend的Pipeline结构由3段流水线构成：
     - size：设置为latency + 1，说明这个SIMQ本身是一个用于延时实现的Queue
     - latency：latency在模拟器中为固定延迟 setting_bpmiss_latency (30) - setting_fetch_to_alloc_latency (16) - setting_alloc_to_exec_latency (8) [- setting_dispatch_latency (6)]；这里的设置反映了一条branch uop最理想情况下通过core pipeline发现branch mis-predict需要flush frontend的时间
 
-## frontend的status管理——基于phythread
+## SMT下的Frontend管理
 
-在SMT中，frontend需要基于phythread进行管理，而backend不需要。对于每一个phythread，其frontend的status切换如下：
+### phythread的frontend status
 
+![frontend-status](dia/frontend_status.jpeg)
 
+- fe_inactive ---> fe_active
 
-## phythread的仲裁机制
+  phythread没有调度logic thread进行执行；当phythread manager调度了一个logic thread在当前phythread执行时，当前phythread切换到active状态，并准备参与到frontend部分的phythread竞争
 
+- fe_active ---> fe_inactive
 
+  当phythread遇到一些较大的stall的原因的时候，当前phythread变为inactive状态；同时此时执行的logic thread进行switch out处理，并换入新的logic thread进行执行。
+
+  较大的stall原因：
+
+  - i/d request miss in ul2 (LLC)
+
+    logic thread有比较多的i/d request ul2 miss，进行logic thread switch；对于这种情况，logic thread会等待较长的时间
+
+  - many branch mis-predict threshold
+
+    当某个logic thread出现较多的branch mispredict的时候，需要进行logic thread switch
+
+- fe_active ---> fe_stall
+
+  当前phythread还是处于active状态，但是会造成当前phythread的frontend stall，stall的时间不等
+
+  | Stall Reason               | Why                                                          | Stall Cycle                                                  |
+  | -------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+  | FE_STALL_REASON_NONE       | No Stall                                                     | N.A.                                                         |
+  | FE_STALL_REASON_RESTART    | frontend after resetting                                     | 0                                                            |
+  | FE_STALL_REASON_ROBCLEAR   | ROB triggered big flush, will reset ROB, backend, and frontend | bpmiss_latency - fetch_to_alloc_latency - alloc_to_exec_latency |
+  | FE_STALL_REASON_BEUFLUSH   | mis-predict, flush frontend, refetch from correct LIP        | bpmiss_latency - fetch_to_alloc_latency - alloc_to_exec_latency - dispatch_latency |
+  | FE_STALL_REASON_BTFLUSH    | branch predict taken, will trigger btflush, but why?         |                                                              |
+  | FE_STALL_REASON_BACFLUSH   | BTB miss<br />1. cond br & predict taken<br />2. direct br<br />3. ! indirect br (handle in be) | default: mtf_latency / fe_clock - 1 + 1<br />setting: 14 + 1 |
+  | FE_STALL_REASON_SCOREBOARD | MSROM<br />READ_SCOREBOARD<br />SET_SCOREBOARD               | fe_ms_scoreboard_stall                                       |
+  | FE_STALL_REASON_REPLACE    | NOT used                                                     | N.A.                                                         |
+  | FE_STALL_REASON_CACHE      | miss in ITLB/ICACHE                                          | depend on pmh or cache reload                                |
+  | FE_STALL_REASON_SLOWILD    | which means slow ild decode, but split to PREFIXES & LCP 2 parts, NOT used | N.A.                                                         |
+  | FE_STALL_REASON_LCP        | length-change-prefix encounter                               | mtf_num_bubbles_prefixes_lcp<br />or mtf_num_bubbles_prefixes_lcp * 2 |
+  | FE_STALL_REASON_PREFIXES   | see many prefixes                                            | mtf_num_bubbles_prefixes_toomany * (num_prefixes-1)/2        |
+  | FE_STALL_REASON_QFULL      | NOT used                                                     | N.A.                                                         |
+  | FE_STALL_REASON_UNKNOWN    | new logic thread switch in                                   |                                                              |
+
+### working thread的调度策略
+
+TBD
+
+### fetch的工作条件
+
+从fetch的工作条件可以看出，fetch的功能逻辑是共享资源，只要有任意一个phythread完成了fetch的操作，那么其他phythread则不能在同T进行fetch
+
+- 当前phythread的fetch没有stall
+- ！任意一个phythread已经完成了fetch
+- frontend处于active状态——有需要执行的logic thread
+- thread_ready，表明当前cycle的frontend的执行cycle已到
+- 当前phythread不处于mwait状态 (mwait意味着处理器进入C-state，等待monitor或是中断唤醒)
+- 当前的frontend pipeline没有被某个phythread独占 (frontend_lock == FRONTEND_NOLOCK)，或者当前调度的phythread独占frontend pipeline
+- 使用的rob没有超过threshold；**这个为什么加入，这里还没有ROB问题**
+
+### decode的工作条件
+
+从decode的工作条件可以看出，decode的功能逻辑不像是共享资源，而是每个phythread有自己单独的解码逻辑
+
+- 当前phythread的decode没有stall —— 当前uop queue没有full
+- frontend处于active状态——有需要执行的logic thread
+- thread_ready，表明当前cycle的frontend的执行cycle已到
+- 使用的rob没有超过threshold；**这个为什么加入，这里还没有ROB问题**
 
 ## 功能实现
 
 ### Fetch
 
+这部分主要进行Instruction Data的读取，将读取后的Instruction Data送入ild流水线中进行X86指令切分。
+
+在fetch流水线阶段，主要完成如下功能——从逻辑上说，这些功能间是串行完成的，但实际HW实现中，有可能是并行的
+
+- 根据LIP进行next fetch的地址预测；如果预测失败(模拟器中可以提前知道是否失败)，那么创建投机路径
+- 读取ITLB，完成VA->PA的映射关系；如果ITLB miss，则通过PMH module进行page walker，标记为CACHE_STALL
+- 读取ICACHE，读取instruction data；如果ICACHE miss，则通过ul2进行data读取；这个过程中可能会将当前logic thread switch-out，标记为CACHE_STALL
+
+- 每次读取的instruction data的大小为mtf_fetch_bandwidth (16) Byte
+
+对于CACHE_STALL而言，其stall时间由后续module的处理完成时间决定
+
 ### Instruction-Lenght-Decode (ild)
+
+这部分主要进行prefix和Length-Change-Prefix (LCP)的识别和处理。如果当前遇到了LCP stall，这被认为是**slow ild (sild)**的处理；而对于LCP_PREFIXES的情况，不设置为sild。在实际的ild流水线中，如果当前被处理的X86指令遇到了下述的两种STALL条件，那么等待当前stall条件完成，继续进行后续指令处理，但是对于两种stall的方式，流水线有不同的处理方式：
+
+- prefix stall              遇到一次，计算一次penalty；ild流水线依然可以被多个phythread共享
+- LCP stall                遇到一次，计算一次penalty，ild流水线进入slow ild模式，在这种模式下，ild流水线不能被多个phythread共享，sild的退出模式为处理完当前fetch line，已经进入下一个fetch line的处理
+
+**两种ild stall类型**
+
+- prefix的处理
+
+  每次prefixes (>2)对于frontend stall的cycle为setting_mtf_num_bubbles_prefixes_toomany (0)，设置frontend_stall_reason为LCP_PREFIXES；结束当前的处理cycle
+
+- LCP的处理
+
+  LCP主要包括两个部分部分：
+
+  - 0x66 (operand-prefix)     改变operand size，修改operand size为！default operand size，default operand size由当前Core运行模式决定：16bit：16位， 32bit：32位，64bit：32位
+  - 0x67 (address-prefix)     改变address size，修改address size为！default address size，default address size由当前Core运行模式决定：16bit：16位，32bit：32位，64bit：64位，在64bit模式下，不能进行16bit的address模式
+
+  LCP对于Core运行时的影响，主要体现在识别代码边界上。因为X86指令属于变长编码指令，所以需要在给定量的指令数据上确定每条X86代码的边界，而LCP主要会影响X86编码中的displacement (address-prefix)和immediate (operand-prefix)这两个部分的解析，从而影响后续X86指令的识别
+
+  当前的模拟器只模拟了支持SSE 1/2/3/4指令集的64位X86处理器。下图是该指令集的X86指令的编码格式
+
+  ![x86_64_sse_encoding](dia/x86_sse_64bit_encoding.jpeg)
+
+  这个编码格式对于LCP有如下一些特点：
+
+  - legacy prefixes group包括0x67, 0x66两个prefix，引入的REX prefix会用于处理SSE相关和64位等特定情况
+  - 存在一类特殊的编码类型：对于某些SSE指令，0x66不属于legacy prefix，而是属于opcode中的mandatory prefix，可以作为mandatory prefix的legacy prefix还包括0xF2, 0xF3。对于采用mandatory prefix进行编码的指令，REX prefix必须位于mandatory prefix和opcode (opcode包括escape byte和opcode byte)之间
+
+  所以，LCP对于指令切分的影响在于要确定当前遇到的0x66是属于legacy prefix还是mandatory prefix，而这必须在Core完全看到一条X86指令的opcode后才能确定。所以，在处理LCP的问题时，会遇到如下情况：
+
+  ![lcp_case](dia/lcp_cases.jpeg)
+
+  从这里可以看出，对于LCP是否会引起frontend stall的情况，只要ild已经获得了当前X86指令的opcode——此时0x66是否是一个legacy operand prefix已经已知，且是否存在displacement和immediate也是已知的——那么，是否stall只对发现opcode的那个ild cycle有效；唯一比较特殊的情况是对于opcode在两个fetch line都存在的情况下，会多引入一次frontend stall
+
+  每次LCP对于frontend stall的cycle为mtf_num_bubbles_prefixes_lcp (6)，设置frontend_stall_reason为LCP_STALL；结束当前的处理cycle
 
 ### Decode
 
+这部分完成X86指令的译码处理，其主要完成如下几方面的功能：
+
+- X86->uop的翻译——function model已经完成
+- trigger MSROM——根据function model的uop序列进行判断
+- fusion的处理
+- 对于在frontend执行的branch指令，进行第一次mis-predict和flush的处理
+
 #### Fusion
+
+
 
 #### MSROM Fetch
 
+
+
 ### Flush
+
