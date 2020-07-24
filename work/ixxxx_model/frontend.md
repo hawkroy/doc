@@ -252,6 +252,7 @@ TBD
 - 读取ICACHE，读取instruction data；如果ICACHE miss，则通过ul2进行data读取；这个过程中可能会将当前logic thread switch-out，标记为CACHE_STALL
 
 - 每次读取的instruction data的大小为mtf_fetch_bandwidth (16) Byte
+- 如果当前X86 Fetch有Fault，那么这个fault会随着当前的uop一直传送到backend进行处理；模拟器因为采用了先执行，后模拟的方式，所以这里的fault不仅是fetch fault，也包括了所有运行时的fault信息
 
 对于CACHE_STALL而言，其stall时间由后续module的处理完成时间决定
 
@@ -299,17 +300,75 @@ TBD
 这部分完成X86指令的译码处理，其主要完成如下几方面的功能：
 
 - X86->uop的翻译——function model已经完成
+
+  每条X86翻译出来的uop序列，第一条uop包含Flowmark_BOM，最后一条包含Flowmark_EOM；对于需要trigger MSROM的uop，下面单独讨论
+
 - trigger MSROM——根据function model的uop序列进行判断
+
 - fusion的处理
+
+- MSROM的uop解码
+
 - 对于在frontend执行的branch指令，进行第一次mis-predict和flush的处理
+
+#### MSROM trigger
+
+在X86解码后，获得uop序列之后，会逐一进行uop的检查，满足如下几个条件，表明trigger MSROM——没有指令来自于XLAT：
+
+- uop带有Flowmark_INS_XLAT_TEMPLATE标志，且uop是当前X86翻译出来的第一条uop
+
+下面的几个条件针对X86翻译出来的每条uop都有效
+
+- X86翻译出来的uop个数大于XLAT译码的最大值
+- uop为ujump指令，表明跳入MSROM执行
+- uop带有READSCORE和SETCORE标志
+
+当执行流准备转入MSROM执行的时候，结束当前指令的decode(在模拟器中为Fetch动作)，切换当前frontend为MSROM路径取指uop，并根据配置插入一些"特定"的uop (num_uops_ms_template (1))：
+
+- 这些uop为"人工"uop，在后续的pipeline处理中需要看下
+- 这些"人工"uop会作为一个decode chunk (setting_fe_width)传送到RAT端
+
+**从这种角度来说，这些 uop是否是用于MSROM的取指延迟仿真？**
 
 #### Fusion
 
+Fusion主要包括两个部分micro-fusion和 macro-fusion
 
+- micro-fusion：多个uop使用同一个物理资源，在后端执行前才会分离；这部分被编码在uop属性中
+- macro-fusion：多个X86指令合并为一个uop；这部分是frontend前端进行处理
+
+fusion的处理请参看fusion.md
 
 #### MSROM Fetch
 
+uop的属性中有两个属性与MSROM的串行处理有关：READSCORE、SETSCORE
 
+- READSCORE：串行点等待标志；当带有此标志的uop需要等待设置fe_scoreboard的uop退休之后，才能继续进行fetch 
+- SETSCORE：串行点设置标志；当带有此标志的uop被MSROM fetch后，会设置fe_scoreboard为当前fetch uop的uop_num (模拟器中为每个uop分配一个全局号)
+
+上面两个feature的使能由如下开关控制：
+
+- setting_wait_on_scoreboard_fetch (0)
+- flag_renaming (1) [rename if/vif/df标志] && uop没有设置NOSCORE_FLAGRENAMING
+
+MSROM Fetch流程：
+
+1. 检查X86的第一条uop是否需要等待fe_scoreboard；如需要，结束当前fetch
+2. 读取MSROM中的uop，设置uop在当前decode chunk中的位置
+   1. uop_pos_in_line：表明uop处于当前decode chunk中的第几个uop
+   2. begin_of_line：表明uop为当前decode chunk中的第一个uop
+   3. end_of_line：表明uop为当前decode chunk中的最后一个uop
+3. 如果当前uop为SETSCORE的串行点，则设置fe_scoreboard
+4. 对于xfxchg的uop进行单独处理 (对应fxch X86指令)，将fxch指令的 翻译的所有uop全部执行完毕，只保留xfxchg uop，并结束当前的指令取指
+5. 进行BPU预测 (**有点奇怪，MSROM为什么进行BPU预测**)
+6. 如果已经取到了当前X86指令的最后一条uop
+   1. 当前处于中断/异常模式，退出中断异常模式，设置transition_point为1
+   2. 如果下一条需要执行的uop为另一条X86指令的开始，那么切换frontend的fetch到之前trigger MSROM的fetch，设置fe_transition_point为1
+   3. 否则，还是处于MSROM模式
+7. 如果已经达到了当前fe_mswidth (4)的最大带宽，则结束当前fetch的cycle
+8. 如果当前uop是一个需要等待fe_scoreboard的uop，同样结束当前fetch的cycle
+
+#### decode mis-predict
 
 ### Flush
 
