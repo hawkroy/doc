@@ -152,7 +152,7 @@ SMT作为一种TLP技术，在性能评估中面临新的问题：
 
 定义程序的speedup为
 $$
-speedup = T_{serial} / T_{parallel}, 理想情况下的speedup为SMT的逻辑核心数 
+speedup = T_{serial} / T_{parallel}, 理想情况下的speedup为SMT的逻辑核心数
 $$
 
 1. 测试单线程程序，设置基准比较数据 (baseline) —— 上面任意的SMT Benchmark

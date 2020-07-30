@@ -216,7 +216,11 @@ Frontend的Pipeline结构由3段流水线构成：
 
 ### working thread的调度策略
 
-TBD
+在进行fetch和decode时，需要从已经ready的phythread中仲裁出当前cycle可以执行的phythread。这部分内容请参考physical_thread.md
+
+具体的fetch和decode stage的调度策略配置为：
+
+setting_frontend_policy(1)： POLICY_PHYTHREAD_INTERLEAVE 
 
 ### fetch的工作条件
 
@@ -256,6 +260,20 @@ TBD
 
 对于CACHE_STALL而言，其stall时间由后续module的处理完成时间决定
 
+#### Fetch Stream Buffer
+
+用于缓存outstanding的icache miss的请求(包括L1I的prefetch请求)，具体请参考i-cache.md
+
+#### Fetch的结束条件
+
+模拟器中的fetch完成了一部分decode的功能，这里的fetch结束条件表示当前cycle不能再继续发送解码后的X86指令序列，包括如下条件：
+
+- ITLB / ICACHE stall
+- ILD stall
+- fetch bandwidth limit (16B)
+- frontend fault (包括fetch stall，ild中的解码stall等，如UD)
+- branch mis-predict (包括BACFLUSH， BTFLUSH两类)
+
 ### Instruction-Lenght-Decode (ild)
 
 这部分主要进行prefix和Length-Change-Prefix (LCP)的识别和处理。如果当前遇到了LCP stall，这被认为是**slow ild (sild)**的处理；而对于LCP_PREFIXES的情况，不设置为sild。在实际的ild流水线中，如果当前被处理的X86指令遇到了下述的两种STALL条件，那么等待当前stall条件完成，继续进行后续指令处理，但是对于两种stall的方式，流水线有不同的处理方式：
@@ -291,17 +309,14 @@ TBD
 
   ![lcp_case](dia/lcp_cases.jpeg)
 
-  从这里可以看出，对于LCP是否会引起frontend stall的情况，只要ild已经获得了当前X86指令的opcode——此时0x66是否是一个legacy operand prefix已经已知，且是否存在displacement和immediate也是已知的——那么，是否stall只对发现opcode的那个ild cycle有效；唯一比较特殊的情况是对于opcode在两个fetch line都存在的情况下，会多引入一次frontend stall
+  对于macro-fusion，可以在fetch阶段进行指令fuse(icache内部)，或是decode阶段进行fuse，其实现在fusing.cc的do_fusing和check_macro_fusion中实现
 
-  每次LCP对于frontend stall的cycle为mtf_num_bubbles_prefixes_lcp (6)，设置frontend_stall_reason为LCP_STALL；结束当前的处理cycle
 
 ### Decode
 
 这部分完成X86指令的译码处理，其主要完成如下几方面的功能：
 
-- X86->uop的翻译——function model已经完成
-
-  每条X86翻译出来的uop序列，第一条uop包含Flowmark_BOM，最后一条包含Flowmark_EOM；对于需要trigger MSROM的uop，下面单独讨论
+- 每条X86翻译出来的uop序列，第一条uop包含Flowmark_BOM，最后一条包含Flowmark_EOM；对于需要trigger MSROM的uop，下面单独讨论
 
 - trigger MSROM——根据function model的uop序列进行判断
 
@@ -310,6 +325,19 @@ TBD
 - MSROM的uop解码
 
 - 对于在frontend执行的branch指令，进行第一次mis-predict和flush的处理
+
+#### Decode的结束条件
+
+模拟器中的decode完成X86指令解码为uop的步骤 (实际实际的解码动作已经完成，这里主要是解码过程中的HW资源限制和设计限制)，包括如下条件：
+
+- 没有可解码的X86指令
+- 当前的X86指令有branch uop，且已经解码的branch uop个数 == setting_fe_mtf_branches_per_clock (0)，且已经解码的taken branch uop个数 == setting_fe_mtf_taken_per_clock(0)
+- IDQ (q_fe_uops)满了，无法接收更多的解码后的uop
+- 当前的uop是“人工”uop且只解码为1条uop(XLAT_TEMPLATE->trap MSROM(>1), INSERT_ESP_SYNC(-1))
+- 当前有fault
+- 待发送的uop不是来自于fetch阶段，而是来自于MSROM
+- 达到了decoder的资源限制；模拟器目前的decoder配置为N(setting_fe_mtfinst(1))-1-1-...-1 (setting_fe_asym_decoders(3))
+- 如果当前decode的chunk(每cycle可解码的最大mtf_decode_bandwidth) > mtf_decode_aligned_chunks(0)，或者decode的byte个数  > mtf_decode_bandwidth(16)
 
 #### MSROM trigger
 
@@ -338,6 +366,10 @@ Fusion主要包括两个部分micro-fusion和 macro-fusion
 - macro-fusion：多个X86指令合并为一个uop；这部分是frontend前端进行处理
 
 fusion的处理请参看fusion.md
+
+#### Stack Engine
+
+在X86 decode阶段，模拟器对于push/pop类似操作stack的X86指令，会进行stack engine的计算和处理，在这个过程中可能会由HW生成uop插入到IDQ中。具体请参看fusion.md
 
 #### MSROM Fetch
 
@@ -370,5 +402,35 @@ MSROM Fetch流程：
 
 #### decode mis-predict
 
+当Instruction进行了ILD后，将X86指令进行切分后，会准备进行X86解码。在解码之前，因为X86指令的所有信息已经完全知道了，所以在这里会进行BPU预测结果的一次修正，主要分为如下两个类型的mis-predict修正：
+
+- BACFLUSH
+
+  对于BTB miss的direct branch(包括jcc/jmp/call)，直接flush fetch stage，并从预测指令的X86指令的直接跳转地址(已知)进行指令fetch。设置phythread的前端stall cycle为setting_fe_bacflush_penalty+1，并设置当前stall_reason为FE_STALL_REASON_BACFLUSH。
+
+- BTFLUSH
+
+  对于BTB不miss的情况，目前还没和具体的HW实现对应起来，后续考虑FTQ的设计， TBD
+
 ### Flush
+
+Flush当backend发生需要flush frontend的情况时，进行frontend的flush和restart动作。这里主要有两个flush的动作，由不同的module进行发起：
+
+- BEUFLUSH
+
+  exec module或是retire module针对mis-predict的branch uop发起的branch miss flush
+
+- ROBCLEAR
+
+  由alloc module发起的针对frontend和alloc的所有flush动作
+
+Flush需要完成的动作：
+
+- clean_fe
+
+  清除frontend的stall和各种SIMQ，如果当前引起flush的uop的opcode是ujump，那么转到MSROM取指，否则转到MTF进行icache取指
+
+- restart_frontend
+
+  重设stack engine的offset，设置新的fetch LIP，clean所有的frontend streambuffer
 
