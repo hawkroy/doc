@@ -24,13 +24,19 @@ Ixxxx模型中支持SMT模式，在已知的Ixxxx的实际产品中，一个物�
 
 Mapping结构反映了模拟器中的Rename机制和结构。模拟器中的Rename采用机制，其具体结构和算法如下：
 
-
+TBD
 
 ### Context (phythread execution environment)
 
+TBD
+
 ### phythread (SMT's HT)
 
+TBD
+
 ### LogicalThread (OS thread)
+
+TBD
 
 ### Physical Thread的冲裁策略
 
