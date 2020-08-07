@@ -10,7 +10,7 @@
 - branch predict预测
 - macro-fusion / micro-fusion
 
-## Front-end的仿真流程结构
+## Frontend的仿真流程结构
 
 ![frontend](dia/frontend_stru.jpeg)
 
@@ -130,13 +130,15 @@ Frontend的Pipeline结构由3段流水线构成：
 
     用于模拟X86解码后的uop输出，和micro-fusion、macro-fusion处理后的uop
 
+    当q_fe_uops[tid] SIMQ为空时，可以直接bypass到allocate阶段
+
     - size：
 
       依据不同的管理方式
-
-      - uops：设计为uop_queue的size (uq_size = setting_fe_uq_size/nthread)，uq_size * max_uops_per_fused
+    
+    - uops：设计为uop_queue的size (uq_size = setting_fe_uq_size/nthread)，uq_size * max_uops_per_fused
       - chunk：按照一次最大解码的X86指令个数管理，即uq_size一个entry表示一次最大的X86解码个数，uq_size * MAX(max_uops_per_mtf, max_uops_per_chunk) * max_uops_per_fused
-
+    
     - latency：0，在这个queue中不体现任何时序信息
 
 - bpu update pipeline
@@ -392,7 +394,7 @@ MSROM Fetch流程：
    3. end_of_line：表明uop为当前decode chunk中的最后一个uop
 3. 如果当前uop为SETSCORE的串行点，则设置fe_scoreboard
 4. 对于xfxchg的uop进行单独处理 (对应fxch X86指令)，将fxch指令的 翻译的所有uop全部执行完毕，只保留xfxchg uop，并结束当前的指令取指
-5. 进行BPU预测 (**有点奇怪，MSROM为什么进行BPU预测**)
+5. 进行BPU预测 (**有点奇怪，MSROM为什么进行BPU预测？因为trigger MSROM的X86指令没有做过预测**)
 6. 如果已经取到了当前X86指令的最后一条uop
    1. 当前处于中断/异常模式，退出中断异常模式，设置transition_point为1
    2. 如果下一条需要执行的uop为另一条X86指令的开始，那么切换frontend的fetch到之前trigger MSROM的fetch，设置fe_transition_point为1

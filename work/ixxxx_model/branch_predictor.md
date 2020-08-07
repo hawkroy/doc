@@ -660,6 +660,8 @@ BPU在SMT的情况下，被多个phythread进行共享，但是预测表中的�
         - 非投机路径上预测正确，更新real counter的值，更新loop entry
         - 非投机路径上预测错误，invalidate当前loop entry
 
+  当本次是一次mis-predict的情况时，对于出现mis-predict的当前phythread的所有loop entry使用real counter改写spec counter，并设置为非spec模式
+
 - **global predictor**
 
   - miss时，根据golen的taken结果分配counter/couter_bl_1/counter_bl_0的初始饱和计数器初值
@@ -681,7 +683,30 @@ BPU在SMT的情况下，被多个phythread进行共享，但是预测表中的�
 
 - **big global predictor**
 
+  big global predictor更新的前提是btb hit
   
+  - hit时
+  
+    - setting_mtf_blgg_global(1)
+  
+      - bg预测器预测正确
+  
+        根据bg预测的结果进行更新
+  
+        - 预测taken，按照golden结果更新counter_bl_1饱和计数器
+        - 预测not-taken，按照golden结果更新counter_bl_0饱和计数器
+  
+      - 预测错误
+  
+        根据golden结果更新counter_bl_1, counter_bl_0两个饱和计数器
+  
+    - else
+  
+      根据golden结果更新counter饱和计数器
+  
+  - miss时
+  
+    根据golden结果同时更新counter、counter_bl_1、counter_bl_0的饱和计数器
 
 ## 模拟器的投机执行机制
 
