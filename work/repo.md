@@ -139,6 +139,31 @@ ssh -X cpuroom@10.29.244.122
      ./build.py -mp
      ```
 
+#### DV Vector生成环境
+
+运行Core RTL的仿真时，需要建立对应的可执行文件影响，在ZX的DV环境中这被称为AVP或是IC文件。AVP/IC文件的建立步骤：
+
+```bash
+# CHX002 env setup
+source /ctwrk/chx002/verification/tpg/bin/chx002a2.cshrc
+
+/haydn/verification/tpg/zxe/bin/release/090816/rasm_40bit/rasm xxx.asm
+/haydn/verification/cnsim/release/chx002a2/cnsim/cnsim.chx002a2 -ma 200000 xxx.avp
+
+# or just use /tmp_space/arch_T3/sw/dv_env/gen.sh to build & run asm code
+```
+
+将生成好的ic文件打包为gz格式的压缩文件
+
+#### Simulation环境
+
+进入/tmp_space/arch_T3/sw的目录
+
+- CHX002环境：chx002_a2_simulation目录
+- CHX003环境：chx003_a0_simulation目录
+
+将DV vector环境中生成的ic压缩文件copy到simulation目录，并修改run脚本中的需要运行的ic文件，在终端执行`./run`运行仿真
+
 ### 软件虚拟机环境中的环境建立
 
 #### 拷贝文件

@@ -1,6 +1,6 @@
 [TOC]
 
-## Uop的属性信息
+## Uop的标记属性信息
 
 在X86指令进行解码的时候，模拟器中的decoder会给解码后的uop标注不同的属性信息，这些信息完全由decoder和uISA的设计决定。在当前的模拟器中，主要有如下的uop属性
 
@@ -48,3 +48,18 @@
 | EOTOP                |                                                              |
 | QUESTIONABLE         |                                                              |
 
+## Uop的运行时属性
+
+- dead_at_rat——在rat端结束，且不进入rob的uop
+  - 完美后端
+  - esp folding的指令
+- exec_at_rat——在rat端执行，直接进入rob等待retire的uop
+  - dead_at_rat的uop
+  - fxchg指令，配置setting_bypass_fxchg(1)
+  - zero_idiom的uop——\*xor/\*sub，配置setting_bypass_zero_marks(0)
+  - mov_idiom(reg2reg的mov且dst不能是partial reg)，配置setting_bypass_moves(0)
+    - setting_bypass_moves == 2的情况(X86级别优化)，当前的uop不对应1条uop，false
+    - setting_bypass_moves == 1的情况(uop级别优化)，当前的模拟器版本中，只有GP/STx/SSE寄存器可以优化
+- 不占用rob资源的uop
+  - macro/micro-fusion的指令
+  - dead_at_rat的指令
