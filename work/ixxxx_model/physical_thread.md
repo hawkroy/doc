@@ -50,7 +50,7 @@ TBD
 struct ThreadingState {
     int phytid;					   // 当前T正在处理的phythread
     int save_g_phytid;			    // 当前T开始仲裁前的初始phythread，这个值由global_priority或是g_phytid[all_core][phythread_tid]决定
-    int count;					   // 当前T正在查看的phythread当前T已经处理了多少请求
+    int count;					   // 当前T已经处理了多少请求，对于THREAD_INDEPENDET情况，每次loop都会清0
     int phytids_used_count;			// 当前T已经有多少个phythread已经处理过
     int phytids_used[MAX_THREADS];	// 当前 T 哪些phythread已经处理了，哪些还没有处理
     float min_used;				   // 资源使用情况，只记录占用量最小的 (float)(used_resource[phytid]/limit_resource[phytid])
