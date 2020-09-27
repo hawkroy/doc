@@ -53,7 +53,7 @@ Core包括
   - 指令的执行，实际的执行动作在function model中已经完成
   - forwarding网络的处理
 
-- Memory-Order-Bbuffer
+- Memory-Order-Buffer
 
 - Cache System
 
@@ -68,9 +68,9 @@ Core包括
 Uncore包括
 
 - Shared L3 Cache
-- SnoopQ
-- FillQ
-- TBD
+- Memory Tracker (MTI)
+- Core Channels
+- FSB Channels
 
 ## 基本的仿真结构
 
