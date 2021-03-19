@@ -1,0 +1,6 @@
+1. phythread是如何管理的
+2. logical thread和phythread之间的对应关系如何设置的
+3. logical thread是硬件真实对应的部件吗
+4. 有哪些点可以进行phythread的管理处理
+5. 对于可以进行thread仲裁的pipeline stage包括哪些，分别如何进行仲裁
+6. 系统中各个物理资源的phythread的划分

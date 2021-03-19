@@ -1,0 +1,35 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+pick port算法
+setting_pb_cycle_execclass_counters(0)，不使用cycle版本
+setting_pb_uses_override_bias(0)，不使用matrix_bias
+
+  1. pick_round_robin_execport (round robin)
+     当前execclass分配了可以执行的port，那么所有与它可以分配相同port的execlass，设置可分配port为下一个，跳过当前port
+  2. pick_pseudo_random_execport (pseudo random)
+     使用随机数 thread_cycle/2 % possible_port，作为当前的port
+  3. pick_ll_class_execport （least load class)
+     统计每个port上的loading，算法是扫描每个execlass的loading，并均分到possible的port上，使用loading最小的port，如果有多个port的loading一致，那么使用least load的算法选择
+  4. pick_flat_priority_execport (flat priority)
+     查找execport_counters-cycle_execport_counters最小的那个port，当前T和上一个T的结果差
+  5. pick_ll_latency_execport (least loaded latency)
+     setting_pb_long_lat_bias(0)
+          0:
+             counter = long_latency_counter[port]
+          1:
+             counter = [long_latency_counter[port], 3]
+          2:
+             counter = (long_latency_counter[port]+1) / 2
+     根据uop的latency，根据每个port上的执行的uop和long latency的uop【只有uop_latency=2的要考虑long latency的uop】的counter，对于使用bias的情况，counter += bias，选择counter最小的那个，当有多个候选，使用8的随机算法
+  6. pick_ll_decaying_execport (least load decaying)
+     使用每个port上的decaying_counters最小的那个port，对于使用bias的情况，counter += bias，当有多个候选，使用8的随机算法
+  7. pick_approx_inline_execport (approx_inline)
+     按照port的exec_counter从小到大排序，按照tmp_bitmask_counts的方式选择
+  8. pick_least_loaded_execport (least loaded)
+     统计每个port上的loading，使用port上的当前执行的loading，这里会考虑是否使用bias的bias_matrix，这个matrix和scheduler进行调度的方式有关（如果allocate bind了一个scheduler，但是这个scheduler无法在正常时间点调度，那么allocate下次进行绑定的时候通过bias的方式来动态选择其他的port)
+     如果有多个相同的port，那么可以采用随机的方式来选择，选择所有可选的port中的((thread_cycle / 2)  % num_tied) + 1
+
+setting_pb_uses_override_freq(false)
+对于从上述方法选择出来的port，需要通过pick_freq_override的方式重新选择一次，通过matrix_bias进行选择，选择matrix_bias最大的候选，怎么和频率有关系的？
+
+特殊情况：对于lock_load，如果制定了port，则只分配到对应的port

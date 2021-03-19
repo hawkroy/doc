@@ -1,0 +1,411 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. load在mob/dl1中的处理流程
+    1. aribtrate in schedule_stage to grant && no cancel signal
+    2. 各种replay条件的检查
+        1. 对于没有使用rb_replace机制的情况，查看当前dl1是否处于evict或是fill的处理中
+            REPLAY_CAUSE_HARDAFFECTED_BY_DL1_EVICT
+        2. 当前dl1是否处于snoop的处理中
+            REPLAY_CAUSE_HARDAFFECTED_BY_DL1_EVICT
+        3. 查看当前执行的uop的src是否都是safe的，对于使用real_cancel_exec的情况，这个一定成立
+            REPLAY_CAUSE_SRC_REPLAYED
+        4. lock_load, 对于setting_do_seriesold_base_locks(0)的情况，如果是uop不是oldest uop，且存在outstanding的store存在
+            REPLAY_CAUSE_LOCK
+        5. lock_load, 对于setting_do_CPU1_fast_locks(1)，且setting_do_single_CPU1_fast_locks(1)的情况，如果!speculative_lock(在lock_predictor不hit)，且uop不是oldest，或者有outstanding的store，或者存在unobserved的request
+              1. 访问dl1，如果是REPLAY_CAUSE_DTLB_MISS||REPLAY_CAUSE_DTLB_MISS_NO_PRB，返回
+              2. REPLAY_CAUSE_LOCK
+        6. lock_load，类似于5，但条件是speculative_lock，处理过程一致
+        7. 对于setting_do_seriesold_base_locks(0)，且还有lock没有处理，对于youger than lock_end的normal load
+              1. setting_hack_seriesold_locks && scheduler.lock_schedule
+              2. !setting_hack_seriesold_locks
+              REPLAY_CAUSE_BLOCK_YOUNGER_LOADS
+        8. 对于uncachable的load，如果不是oldest，或有outstanding store，或smb有pending store(需要evict)
+              REPLAY_CAUSE_ATRET
+        9. 对于split的load
+              1. 已经获得了split reg的load，进行后续的mob/dl1的处理(access_memory)
+              2. request splitreg
+                  1. grant，设置为SPLITLOW，进行后续的mob/dl1的处理(access_memory)
+                  2. !grant，REPLAY_CAUSE_NO_SPLIT_REG_AVAIL
+       10. access_memory
+              1. zero size load, which case
+                  REPLAY_CAUSE_NONE
+              2. agu计算地址(done in function model)
+              3. 访问dtlb
+                   1. 使用partial address进行index，需要检查alias的情况
+                   2. 使用full address进行index
+              4. dtlb miss  -> r.miss_dtlb
+                  1. 访问pmh，进行page walker
+                  2. pmh grant
+                      REPLAY_CAUSE_DTLB_MISS
+                  3. pmh !grant
+                      REPLAY_CAUSE_DTLB_MISS_NO_PRB
+              5. dtlb hit -> r.dtlb_hit
+                  1. 对于setting_do_CPU1_fast_locks(1)的情况，如果当前uop是oldest uop，lock_load，!replay，dtlb_hit
+                      更新对应的lock_table[entry].tlb_hit
+              6. 对于allocate阶段设置为mem_renamed的load，且setting_mrn_no_mem_access(1)，进行storeq的check
+                  1. 对于设置了r.dependent_on_older_stas || r.mem_renamed的!sw_prefetch的load
+                      扫描storeq{tail, r.sbid}(这里不包括senior store)，如果有任意一个sab没有计算出有效的vaddr{cycle_addr_ready == 0 || cycle_addr_ready > cur_time+replay_latency}
+                      1. 对于通过mdisamb table预测为misamb_allow的load，nothing {说明load与前面的store大概率没有关系}
+                      2. REPLAY_CAUSE_STA_GUARD_WINDOW，记录引起此次replay的sbid，更新src_ptr[DEP_STA_INDEX]=sab.s
+                  2. 对于!xargv_mfp的情况，检查load与store之间的dependency关系——对于6为false path
+                      1. 存在dependency关系，但是不能forward，必须等到store retire
+                         store没有complete，意味没有commit store
+                         REPLAY_CAUSE_CANNOT_FORWARD，记录引起此次replay的sbid
+                      2. 可以进行forward
+                         1. 对应的std没有store complete，意味没有commit store
+                             1. 如果std已经complete，仅仅是没有commit，那么标记load complete
+                             2. REPLAY_CAUSE_ST_FORWARD_INCOMPLETE_ST，记录引起此次replay的sbid
+                         2. commit store，则标记load完成，没有replay
+               7. 开始dl1的访问
+                  1. 如果当前处于rb_replace的状态(rb full的情况)
+                     REPLAY_CAUSE_DL1_BANK_CONFLICT
+                  2. 设置当前cycle为dl1_read_cycle
+                  3. 进行dl1 bank的查看
+                      满足如下条件，进行replay，否则设置dl1.num_reads[bank]++, dl1.read_addr[bank] = s.paddr, dl1.read_size[bank] = s.size
+                      REPLAY_CAUSE_DL1_BANK_CONFLICT
+                           1. 多个load访问到相同的bank
+                           2. !(多个load访问到相同的bank，但是是相同的cache line, setting_dl1_bank_cnfl_excl_same_line_ld(1))
+                           3. !(多个load访问的地址范围一致，setting_dl1_bank_cnfl_excl_same_addr_ld(0))
+                           4. !(多个load访问到相同的set，setting_dl1_notld_bbc_same_set(0))
+               8. 进行storeq的cam检查，与6相同的处理，如果可能，标记load完成
+               9. 8中没有replay时，对于xargv_mfp，且预测有forwarding的情况  —— 这种情况可能也不存在，因为如果进行了mfp，那么在schedule的时候就会处理
+                   1. 对应的std没有store complete，意味没有commit store
+                       std没有complete
+                       REPLAY_CAUSE_ST_FORWARD_INCOMPLETE_ST，记录引起此次replay的sbid
+                   2. push request到hwp_l2的reorderq中 (没有enable)
+               10. 需要访问dl1
+                    1. 进行dl1 hwp的detect处理，用于发现目前hwp中是否存在对应的entry
+                    2. 访问dl1且同时检查fill buffer是否hit (fill buffer检查时，对于smb检查对应的tid，而lmb不检查tid，两者都不能是uncachable，并且data match)
+                        1. dl1/fill buffer hit
+                            1. push request到hwp_l2的reorderq中 (没有enable)
+                            2. 对于fill buffer hit
+                                1. !swp && load, 对于bank conflict的load，如果hit在相同的fill buffer中(setting_dl1_ld_bbc_same_lmb(0))
+                                    REPLAY_CAUSE_DL1_BANK_CONFLICT
+                                2. 设置r.fb_hit
+                            3. 如果当前thread是存在miss_vaddr，那么消除
+                            4. hwp_train_on_every_l1_access(0), 每次访问dl1，都进行ul2的hwp training
+                            5. 对于uncachable load，如果dl1 hit，那么需要将对应的entry invalid
+                            6. 表明load完成
+                        2. miss
+                            1. 检查load是否与smb存在相同cacheline(这里的检查仅仅检查paddr是否有overlap，不能是UC)
+                                   a. 对于smb clean的状态，smb dealloc， 不overlap
+                                   b. 对于smb dirty的状态，smb evict，overlap
+                                   上面两个状态表明smb有全部的data
+                                   c. smb overlap split_load, overlap
+                                   d. smb partial hit load, overlap
+                                   对于b/c/d，设置smb entry的smb.load_hit
+                                1. !(setting_smb_l1_reconnect==1 && has match smb) && load, REPLAY_CAUSE_DL1_MISS, 在对应的smb dealloc时，会进行notify
+                            2. 如果是首次miss，且dl1 hwp中没有对应的entry
+                                1. 在dl1 hwp中创建对应的entry
+                            3. 对于!swp，访问ul2
+                                1. ul2 hit, REPLAY_CAUSE_DL1_MISS
+                                2. ul2 miss, REPLAY_CAUSE_UL2_MISS
+                            4. 检查lmb，是否存在相同cacheline的情况，不能是UC
+                                1. 存在，且对应的lmb.is_on_bus==1(表明request将访问uncore)， REPLAY_CAUSE_DL1_MISS——false path，会被后面覆盖
+                            5. 分配lmb，对于swp也分配(setting_swp_use_lmbs(1))
+                                  a. 存在相同的lmb(必须是相同tid)，分配失败，且如果当前match的lmb complete，且dl1 evict buffer有空间且lmb和当前load不是同一个，则进行fill buffer replace
+                                  b. lmb full，分配失败
+                                      1. 有空间，但是不是fill buffer reservation的uop
+                                      2. 没有空间
+                                          1. 不是stapref且!bogus，申请fill buffer reservation
+                                          2. 尝试进行smb的wc_evict
+                                  c. 对于serializing_splits(0)，如果有空余，但是split load没有分配split reg，分配失败
+                                  d. 分配成功，占用一个新的entry
+                                1. fail
+                                    1. lmb full
+                                        REPLAY_CAUSE_DL1_MISS_NO_FB
+                                    2. REPLAY_CAUSE_DL1_MISS
+                                2. success
+                                    1. 通过q_unordered_ul2 SIMQ进行发送
+                                    2. 标记load完成
+                                    3. 设置r.miss_dl1=1
+             11. 没有replay时，对于xargv_mfp，且与store有overlap的情况，如果对应的DEP_RET store没有commit store
+                  1. REPLAY_CAUSE_CANNOT_FORWARD, 标记对应的store entry
+             12. 没有replay且!swp，进行sab的disambiguation的检查
+             13. 对于进行了mdisamb预测的load，如果load完成，且预测为mdisamb_allowed，那么标记当前load为mdisamb_done
+       11. 对于at_retire_page_splits(1)的情况，如果是span page的load，如果不是oldest或是有outstanding store存在
+              REPLAY_CAUSE_AT_RETIRE_PAGE_SPLITS
+       12. 对于存在DEP_STD的情况，如果是unalign_fwd，!replay, !mem_renamed, !bogus, !setting_schedule_from_mob(1), src_safe_replay_count < unaligned_fwd_replay_count(2)
+              REPLAY_CAUSE_UNALIGNED_FWD，标记对应的std entry
+       12. 对于split load的情况
+                 a. 已经获得了split reg
+                 b. replay为REPLAY_CAUSE_AT_RETIRE_PAGE_SPLITS，REPLAY_CAUSE_AT_RETIRE_LOAD_SPLIT，REPLAY_CAUSE_CANNOT_FORWARD，REPLAY_CAUSE_ST_FORWARD_INCOMPLETE_ST
+              释放对应的split reg
+       13. 对于split load，如果当前处理的为SPLITLOW部分，且没有replay
+              REPLAY_CAUSE_SPLIT_LOAD
+   3. 对于bogus的uop
+       1. 释放split reg， fill_buffer reservation
+       2. setting_instant_reclaim_bogus_buffers(1)，push进入q_retire等待retire
+2. sta的处理
+   sta在目前的实现中，按照load进行处理
+2.1 sta在mob/dl1中的处理流程
+   1. aribtrate in schedule_stage to grant && no cancel signal
+   2. 各种replay条件的检查
+       1. 查看当前执行的uop的src是否都是safe的，对于使用real_cancel_exec的情况，这个一定成立
+           REPLAY_CAUSE_SRC_REPLAYED
+       2. 对于sta，且当前还没有计算出有效地址
+           1. 唤醒sleep mob的load {st_rid, REPLAY_CAUSE_STA_GUARD_WINDOW}  —— 大概率不会走到这里，在main pipeline中当sta dispatch之后1cycle就会处理，only bogus会走到这里？
+           2. 设置r.cycle_addr_ready = cur_time + uop_delay
+           3. 更新sab entry
+       3. sta_unlock, 对于setting_do_seriesold_base_locks(0)的情况，如果不是oldest
+           REPLAY_CAUSE_STA_UNLOCK
+       4. sta_unlock, 对于setting_do_CPU1_fast_locks(1)的情况，如果对应的lock_table的entry.tlb_hit=0
+           REPLAY_CAUSE_STA_UNLOCK
+       5. access_memory
+           1. zero size load, which case
+               REPLAY_CAUSE_NONE
+           2. agu计算地址(done in function model)
+           3. 访问dtlb
+               1. 使用partial address进行index，需要检查alias的情况
+               2. 使用full address进行index
+           4. dtlb miss  -> r.miss_dtlb
+               1. 访问pmh，进行page walker
+               2. pmh grant
+                   REPLAY_CAUSE_DTLB_MISS
+               3. pmh !grant
+                   REPLAY_CAUSE_DTLB_MISS_NO_PRB
+           5. dtlb hit -> r.dtlb_hit
+               1. 对于setting_do_CPU1_fast_locks(1)的情况，如果当前uop是oldest uop，lock_load，!replay，dtlb_hit
+                   更新对应的lock_table[entry].tlb_hit
+           6. 对于WB类型的sta，在stapref的queue中分配单元
+           7. 设置sab中对应的paddr valid
+           8. 针对已经进行过schedule的loadq(进行过执行)进行store的recheck，用于发现memory_ordering的问题，当前sta不是bogus
+               1. 如果当前的vaddr[11:3]有overlap, !setting_mdisamb_sta_match_use_bytemask(0) || bytemask overlap
+                   1. 设置对应load.mdisamb_reset = 1
+                   2. 如果load.mdisamb_done = 1, 那么设置load.mdisamb_bigflush=1，说明存在memory ordering问题，准备进行big flush
+       6. at_retire_split_stores(0)，且split, !bogus
+           1. 如果!oldest，且有outstanding的store
+               REPLAY_CAUSE_AT_RETIRE_SPLIT_STORE
+           2. sta的replay次数 < at_retire_split_store_replay_count(1)
+               REPLAY_CAUSE_AT_RETIRE_SPLIT_STORE
+2.2 sta在stapref queue中的处理
+   1. 当sta在mob pipeline上时，会push进入staprefetch queue
+       1. 查找有没有相同cacheline地址的request，有，返回
+       2. 更新当前的queue head (从当前head遍历，如果是valid且已经是accept的请求，则head++)
+       3. 从head开始查找是否有空的entry (!valid || accept)
+           1. 有空的entry，更新
+           2. 没有空的entry，则直接覆盖写head entry，head下移
+   2. 每个Core cycle，进行sta prefetch的处理
+       1. 如果当前cycle可以访问的load port(setting_bb_nb_load_ports(2)，与scheduler调度load share相同的load pipeline，利用空闲带宽)已经用完，那么直接返回
+       2. 从head遍历还没有发送的request
+          1. 如果都发送了，返回
+          2. 更新load port的利用率
+          3. 访问dl1
+              1. hit，表明request.issued/accepted
+              2. miss，尝试分配lmb
+                 1. fail(对于有相同地址的lmb，??不认为是fail，会继续尝试分配??)，返回
+                 2. success
+                     1. 设置issued
+                     2. 通过q_unordered_ul2进行访问
+    3. 当request miss dl1, 访问ul2时, 对于stapref，complete没有意义
+       1. 当ul2 hit，则设置accepted, completed
+       2. 当前ul2 miss
+           1. ul2 访问完后，设置accepted，??但是lmb已经释放，意味着data不回填dl1??
+           2. 当data refill后，通知completed
+3. store在dl1中的处理流程(4cycle流程， store_retire)
+在多个phythread间interleave处理
+    1. 检查当前待处理的store是否为store_head
+        1. no，则当前store结束，设置ss.issued = false，等待下一次处理
+        2. yes，但是bogus，直接结束
+           1. push进入q_reclaim_sb等待回收， real_num_sb[tid]立即+1
+           2. 释放fill_buffer的reservation
+           3. 设置ss.cycle_store_completed
+           4. 对于ss.lock(setting_enable_lock(0)，用于多核间的lock处理)
+               1. 删除对应的lock标记
+           5. 唤醒mob scheduler中的load, {ss.rid, REPLAY_CAUSE_CANNOT_FORWARD}   ??这种情况会存在吗??
+           6. !setting_std_retire_at_commit(0)，释放对应的仿真uop
+           7. 更新store_head+1
+        3. yes，但不是bogus
+           1. 对于uc_store或是nt_store， invalidate dl1/ul2
+           2. 如果当前cycle有snoop进行处理，那么store abort， store等待下一次pipeline处理
+           3. 如果setting_rb_replace(1)，fill buffer正在进行replace处理(fill buffer full的情况)
+              1. store abort
+           4. setting_dl1_bank_conflicts_stores(0)，检查store访问的dl1 bank是否与fill和load间冲突
+              1. 冲突，则store abort
+              2. 不冲突，store设置当前cycle对于bank的访问 (没有block read/fill?)，设置dl1_write_cycle为1
+           5. 访问dl1
+              1. hit
+                 1. setting_store_memory_ordering(1)
+                     1. 存在还没有observed的store, num_unobserved[tid] > 0, store abort
+                     2. 不存在，写入dl1, STATE_M, store done
+              2. miss
+                 1. 检查lmb
+                     1. 检查lmb中的entry，如果有match的entry，则检查失败，且如果当前match的lmb complete，且dl1 evict buffer有空间且lmb是当前store的sta分配的单元或是uop分配的单元，则进行fill buffer replace
+                 2. 分配smb
+                     1. 检查store与smb中的entry的match情况 (只检查地址，且不能是UC的)
+                         1. 有match的情况
+                             1. match的smb正在evicting，分配失败
+                             2. 没有满足stcombine的时间要求(cur_time-alloc_time > setting_smb_uncomb_window(0)*2), 分配失败
+                             3. setting_store_memory_ordering(1)，不满足以下2个条件，分配失败
+                                    a. 相同tid，是上一次最后分配的smb || num_unobserved[tid]=0 || smb.is_stapref(目前配置不成立)
+                                    b. 不相同tid，smb.is_stapref(目前配置不成立) || smb.observed
+                             4. 分配成功，且store可以进行smb_combine
+                         2. 没有match
+                             1. 有clean/idle的空间
+                                 1. 不是fill buffer reservation的uop，分配失败
+                                 2. fill buffer reservation为空或是reservation的uop，分配成功，但是不match
+                             2. 没有空间， 分配失败
+                                 1. 不是stapref，申请fill buffer reservation
+                                 2. 尝试进行smb的wc_evict
+                     2. 步骤1存在match的情况
+                          1. 直接combine，写入对应的smb，store done，返回成功
+                             1. 对于combine的情况，如果CLEAN->DIRTY， 对于WC类型，如果写满，直接evict
+                     3. 步骤1不存在match的情况
+                          1. 分配entry失败，返回失败
+                          2. 分配entry成功，返回成功
+                              1. 写入对应的smb
+                                  1. 对于WC类型，设置为Dirty，如果已经写满，则直接evict
+                              2. release fill buffer reservation
+                              3. 对于配置为!setting_wbl1(1)的cache，invalid相应的dl1的cacheline
+                              4. 对于!WC类型的store
+                                  1. setting_ofor_enable(1)
+                                      1. 分配gob的entry
+                                          1. 对于UC，设置uc属性
+                                             1. 如果当前的gob的go指针==allocate指针
+                                                push进入q_unordered_ul2{PRIORITY_undisturb_ld}
+                                          2. 对于WB
+                                             push进入q_unordered_ul2{PRIORITY_undisturb_ld}
+                                      2. 更新gob的allocate_ptr
+                                      3. num_unobserved[tid]++
+                                  2. !setting_ofor_enable
+                                      1. push进入q_ordered_ul2{PRIORITY_undisturb_ld}
+                                      2. num_unobserved[tid]++
+                 3. 如果1/2均成功，则store done
+           6. 如果store完成，则进行clean 处理
+                 1. push进入q_reclaim_sb等待回收， real_num_sb[tid]立即+1
+                 2. 对于!bogus的store，释放sdb(store buffer)
+                 3. 释放fill_buffer的reservation
+                 4. 设置ss.cycle_store_completed
+                 5. 对于ss.lock(setting_enable_lock(0)，用于多核间的lock处理)
+                     1. 删除对应的lock标记
+                 6. 唤醒mob scheduler中的load, {ss.rid, REPLAY_CAUSE_CANNOT_FORWARD}
+                 7. !setting_std_retire_at_commit(0)，释放对应的仿真uop
+                 8. 更新store_head+1
+3. mob pipeline的时序， 见图
+4. request buffer (lmb/smb)的处理流程
+    1. lmb的处理流程
+        1. lmb的分配
+           1. normal load/sw prefetch，访问dl1/fb miss的时候
+           2. stapref queue访问dl1 miss的时候
+        2. lmb的释放
+           释放的时候会通知mob scheduler，{NULL，REPLAY_CAUSE_DL1_MISS_NO_FB}
+           1. check_and_complete_fb, {ul2通过q_dcu_fill通道返回data，或是gob已经设置了go}， 不用fill buffer replace ——由4代替
+               l2 complete且所有data valid
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           2. l2->enqueue, 对于swp
+               当swp对应的lmb已经grant访问ul2后
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           3. fsb_arbiter, ucore_rsp channel收到UNC_REQ_KILL_PREFETCH，对于swp —— false path
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           4. l2_arbiter_access_l1_for_fill {fill buffer进行replace，或是ul2直接回填dl1，不经过fill buffer(没有配置)}
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           5. l2_arbiter_handle_ul2_miss，对于stapref queue scheme
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           6. rqstq_promote_recycle，对于swp
+               处理rqstq的entry promotion的时候，swp的request被相同功能的rqstq entry替代
+               通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+           7. need_replay, serializing_splits(0) && setting_no_lmb_before_splitreg(1)
+              对于split load，没有获得split reg，那么对于申请到lmb释放
+    2. smb的处理流程
+        1. smb的分配
+            1. normal store访问dl1 miss的时候
+        2. smb的释放
+            如果当前smb.load_hit，说明有load等待当前smb, 通知mob scheduler, {req, REPLAY_CAUSE_DL1_MISS}
+            通知mob scheduler, {NULL，REPLAY_CAUSE_DL1_MISS_NO_FB}
+            1. smb_evict, SMB_CLEAN
+            2. cam_smbs_for_conflict, SMB_CLEAN
+            3. smb_clean, SMB_CLEAN && smb.go2idle
+            4. write_smb, SMB_CLEAN
+            5. check_and_complete_fb, wb_store，不用fill buffer进行replace —— 由7代替
+            6. l2_arbiter_handle_write_bus_request, uc_store/wc_store
+            7. l2_arbiter_access_l1_for_fill, wb_store, fill buffer进行replace
+        3. smb的状态机，见图
+    3. request buffer的分配逻辑    TBD
+5. mob scheduler的逻辑
+   mob scheduler的逻辑主要完成当LSU中有request被wakeup后，woke up的request之间的arbiter逻辑以及memory request的schedule逻辑
+   1. arbiter逻辑
+      当前的实现中，mob scheduler通过exec port进行调度，目前配置的exec port上有两个port可以执行load/sta
+           1. ld_agu0
+               只能执行load操作，默认load的优先级高
+           2. ld_sta_agu1
+               可以执行load/sta两种操作，默认sta的优先级高
+      mob scheduler，主要包括4层arbitration逻辑
+         1. LSU中ready的request之间的arbiter，load/sta分别arbiter
+             按照program order的优先级调度
+         2. phythread间的arbiter，按照当前cycle的thread优先级调度，load/sta分别arbiter
+             thread间采用time_interleave方式，每cycle更换优先级，如果当前cycle高优先级没有request，那么尝试低优先级
+         3. exec port上的request的优先级仲裁
+             exec port有的可以同时支持load/sta操作，当有多个操作存在时，按照port的默认优先级进行调度
+         4. fb_bypass的request与exec port上的request优先级仲裁
+             当存在fb_bypass的request时，总是优先选择fb_bypass的request
+   2. schedule逻辑
+      1. fb_bypass的schedule逻辑
+          1. 如果进行调度时，uop已经bogus了，那么直接kill掉，并push进入q_retire，等待retire
+          2. 复用rs的schedule逻辑进行调度
+             ??为什么第一次一定会成功??
+      2. exec port上的load/sta的schedule逻辑
+          1. 对于setting_do_seriesold_base_locks(0)的情况，如果mob_load_lock_sched[tid]处于schedule状态{说明一个!bogus lock_load正在执行}
+              1. 当前执行的uop.paddr != lock_load.paddr，那么uop重新设置ready信号，本cycle schedule失败
+          2. setting_hack_seriesold_locks(0)，且lock_scheduled{表明lock_load正在wakeup，准备进行schedule}
+              1. 当前的uop不是对应的lock_load，那么下一个cycle进行重试
+          3. 对于bogus的uop{这里的bogus是bogus uop上了exec pipeline后发现是bogus uop，不是retire/exec后设置的bogus}，直接kill掉，尝试新的uop进行调度
+          4. 对于从last_exec-cur_time < setting_mob_min_wake_latency(4)
+              不能调度
+              1. setting_blocking_mob_sched(0)
+                 uop下一个cycle进行调度
+              2. !setting_blocking_mob_sched(0)
+                 uop重新设置ready信号，scheduler尝试调度其他ready的uop
+          5. 进行mob uop的调度
+               a. 对于!setting_sched_ld_on_fill(1)的情况，如果当前是正在执行fill(dl1_fill_cycle)，NOLDPORT，失败
+               b. 如果当前正在执行snoop(snoop_cycle)，NOLDPORT，失败 —— false path
+               d. 如果当前的dispatch_port_busy处于busy，失败——不会发生，mob schedule总是优先级最高
+               e. 计算uop的执行latency
+                   1. 对于fp类型的uop，setting_fpload_latency(8)
+                   2. 对于int类型的uop，setting_l1hit_latency(8)
+                   3. 对于2nd和之后的load，extra latency为setting_multiple_load_additional_latency(0)
+                   4. 对于需要对齐的load(vaddr%4 != 0)， uop_latency -= setting_no_alignment_savings(0)
+                   5. 对于memory renamed的load，如果setting_mrn_0cycleld(0)，设置uop_latency = 0
+               f. 如果当前调度的是sta，唤醒mob schedule中的load, {rid, REPLAY_CAUSE_STA_GUARD_WINDOW}
+               g. 不更换当前uop的执行port
+               h. 对于split load, !serializing_splits(0)
+                   1. 如果当前没有在读取split reg的SPLITHIGH，那么不wake up scheduler中的uop (cycle_result_ready)
+                   2. 正在操作SPLITHIGH
+                      1. ready=cur_time + uop_latency
+                      2. 对于setting_trivial_op_detection(0)，uop是extratiny_op || extratiny_op_move
+                          ready = cur_time + xadd_latency(2)
+                      3. ready -= setting_dispatch_latency(2) - setting_mob_dispatch_latency(2)
+                      4. 如果recent_ld_dep_vector[prev_sched][prev_execport][RS/MOB] != 0，只设置cycle_result_ready_2nd_sched
+                      5. 设置ready
+               i. 设置dispatch_port_busy，对于setting_full_portbinding(1)，设置所有scheduler的execport都为1
+               j. 对于首次调度的uncachable load，invalide dl1/ul2
+               k. 统计dispatch的replay，对于setting_split_sched_exec，一定没有replay
+               l. 计算bad known
+               m. 计算recent_ld_dep_vector
+               n. 对于load/sta，如果当前没有replay
+                   1. 对于setting_do_seriesold_base_locks(0)，oldest的uop，且!bogus
+                      1. 设置mob_load_lock_sched[tid] = 1 —— exec阶段的没有用处了
+                          lock_asserted
+                   2. 对于setting_do_CPU1_fast_locks(1)，r.speculative_lock，且目前不是bogus
+                          speculative_lock_in_progress[tid] = 1
+               o. 进行实际的dispatch
+                   1. 如果r.bad_known_exec == cur_cycle，直接cancel当前的dispatch
+                   2. 否则，发送到q_mob_dispatch_rid/phytid的SIMQ中等待执行
+             1. 成功，清除ready信号
+             2. 失败，等待下一个cycle重新调度
+6. mob中replay的总结
+   mob的唤醒方式：
+      1. wakeup_atret_load
+          针对每个phythread, 每cycle调用，用于处理retire阶段的wakeup和周期性的wakeup
+      2. wakeup_from_mob_fb_bypass
+          唤醒特定phythread的特定load用于fill buffer bypass的处理
+      3. wakeup_from_mob
+          通过特定的request进行load的唤醒，不区分phythread(目前实现中所有符合条件的thread都会唤醒)
+      4. wakeup_from_mob_by_st_rid
+          唤醒依赖特定std的load，不区分phythread(实际上sleep进行比较的时候考虑了phythread)
+      5. wakeup_from_mob_younger_loads
+          唤醒特定phythread的younger load
+7. split load的实现方法
+   1. 两种split load的处理方法
+      1. seriliaze_split
+      2. split reg
+   2. at_retire_split_load 

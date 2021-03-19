@@ -1,0 +1,14 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+cycle_exec_known_bad
+	更新：
+		1. uop在exec中执行，但是出现了replay， = cur_time + uop_latency - sched_latency
+		2. cancel_exec，当scheduler调度的时候发现当前uop的依赖存在不可信的值时，需要cancel当前uop的执行   —— 仅仅对!split_sched/exec
+		3. 在exec阶段要执行的uop为bogus uop，则直接cancel对应的执行
+		4. 在schedule之后，当uop已经准备进行dispatch的时候，进行最后一次uop的依赖关系的check，假设所有依赖都是可信的，如果某个依赖不可信，则标记那个不可信的依赖时间
+	查询：
+		1. 当准备进行执行前，如果uop的依赖不可信时，放弃当前执行，mem uop也不push mob_scheduler
+		2. 检查uop的依赖是否ready的时候，如果依赖时不可信，且已经是不可信的(< cur_time)，那么uop不ready
+		3.  split_sched/exec
+		    检查uop是否可调度时，如果当前uop的还没有达到不可信状态，不调度，说明还没有执行完毕；
+		    或者，如果是第一次进行RS dispatch，但是cycle_scheduled != known_bad，说明还没执行完毕

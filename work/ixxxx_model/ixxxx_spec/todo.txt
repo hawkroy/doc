@@ -1,0 +1,13 @@
+1. logic thread是硬件还是软件，怎么切换的
+2. thread仲裁方法，RoundRobin和Interleave的区别
+3. 操作数的读写端口数量
+4. ILD的前端流水线结构如何
+5. 确定下uop port prio的优先级关系
+6. 对于smb中的write combine的处理
+      T0                 T1
+      X
+                           Y
+                           X (can merge with T0 X?)
+7. ul2的promotion操作
+8. mob scheduler的thread flipper操作(每10cycle)
+9. split store是否会造成ordering的问题

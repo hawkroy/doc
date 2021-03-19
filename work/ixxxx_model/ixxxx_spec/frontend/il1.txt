@@ -1,0 +1,47 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. il1的pipeline时序
+   在访问itlb/icache时，如果是hit，则不消耗latency，如果是miss，则消耗相应的latency(多数情况下，latency不确定)
+   1. 访问itlb，查看是否为hit
+   itlb如果配置了setting_itlb_partitioned(1)，则按照phythread进行划分；cache内部包含tid tag
+       1. miss，产生pmh request，icache fetch stall直到itlb refill
+       2. hit，接着通过paddr访问icache
+   2. 使用paddr访问icache
+   icache配置了partitioned_icache(0)，则按照phythread进行划分；配置了threaded_icache(0)，则cache内部包含tid tag
+       1. hit，进行stream prefetch的train
+       2. miss，如果当前req还没有访问ul2，设置ul2访问优先级为priority_fetch
+          1. 查看ul2 rqstq中是否包含相同地址的fetch request
+             1. 包含，当前的request为filter request，不需要再次发送到ul2，icache fetch stall为setting_fe_num_stall_fe_filtered(8)
+             2. 不包含，request通过ul2 interface发送到ul2，需要判断ul2是否可以接收，icache fetch stall直到icache refill
+          2. 相应的request进入stream buffer
+              1. hit，不进入
+              2. miss
+                 1. stream buffer中有空余，进入
+                 2. 没有空余，则更新最后一个entry
+          2. setting_stream_fetch_on_miss(1)，进行stream prefetch的train
+2. stream fetch的机制
+    1. train的时机
+        1. l1i hit
+        2. l1i miss && setting_stream_fetch_on_miss
+    2. prefetch的机制和流程
+        1. 每次prefetch的发送都由fetch train引起，即只有stream prefetch被train后，才会产生相应的prefetch request
+        2. 有两种模式的stream prefetch
+            1. bpu guide，setting_fe_stream_pred(0)
+               根据当前fetch addr查找bpu，确定相应的target，获取对应target的cache line
+               如果相应fetch addr bpu miss，则fetch addr递增直到当前cache line边界
+            2. next fetch line
+               获取当前fetch addr的下一个cache line
+        3. 每次train，会产生setting_fe_stream(1)条prefetch request
+        4. 产生的prefetch request，如果配置!setting_stream_fetch_no_checks(0)，则需要访问itlb/icache
+            1. itlb miss，退出本次的stream prefetch
+            2. itlb hit
+               1. icache hit，不产生prefetch到ul2，继续尝试下一个prefetch
+               2. icache miss
+                  1. 查看当前ul2 rqstq中是否包含相同的地址request
+                      1. 包含，本次的prefetch不发送到ul2
+                      2. 不包含，发送到q_stream_fetch SIMQ等待进行stream prefetch的发送
+                  2. 将当前prefetch request加入到stream buffer中
+         5. 每个cycle查看q_stream_fetch中是否有ready的request，如果存在
+            request通过ul2 interface发送到ul2，需要判断ul2是否可以接收
+            1. 可以接收，则移除相应的request
+            2. 不能接收，下次重试

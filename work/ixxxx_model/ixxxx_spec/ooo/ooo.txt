@@ -1,0 +1,561 @@
+/* vim: set nowrap expandtab ts=2 sw=2 sts=2 fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. ooo的整体结构
+   ooo主要包括core如何进行不同uop在不同的execport上的调度执行问题，如果按照dataflow的方式进行指令的调度，分发，执行以及replay和complete的处理
+
+2. ooo的各个部分的管理数据
+   1. uaq(uop allocation queue)
+      1. uaq的分配
+         在alloc阶段，根据不同uop execclass对应的scheduler的对应的uaq进行放置；uaq与scheduler为一对多的关系
+         uaq存储的uop不区分phythread，但是uaq进行scheduler分配时考虑进行
+      2. uaq->scheduler的分配
+         进行分配时需要考虑phythread之间的仲裁(setting_uaq_policy, 目前采用phythread_interleave)，当前T从选中的phythread最多可以发送uaq[uaq].read_ports多个uop
+        1. uop已经是beuflush后的uop (!in_uaq)，直接忽略
+        2. 出现了thread_stall[tid]——hurricane导致，退出
+        3. 尝试进行scheduler绑定, 且不能超过当前scheduler的wr_port上限，表示scheduler每T多个可以分配几个uop
+            1. setting_uaq_hiprior_emp_binding(1){从优先级最高的scheduler尝试分配}
+            2. setting_uaq_to_least_full_sched_binding(0){从empty entries最多的scheduler进行分配}
+            scheduler空entry的计算方法
+                 1. !setting_rob_shared(0)
+                    1. setting_sched_thread_partition(0){多个thread partition rs}， scheduler_size[sch] = scheduler_size / nthread??
+                        代码实现有问题，本意应该是判断每个phythread占用的rs entry数量是否达到了partition的rs上限, 这里的rs entry的统计没有按照unfused uop的情况统计
+                    2. !setting_sched_thread_partition, scheduler_size[sch] = scheduler_size
+                       1. 按照unfused uop的分配考虑 (setting_new_rs_fusing(1), setting_unified_sched_dont_count_fused(1))
+                       2. 按照uop的分配考虑
+                       计算当前phythread已占用的rs entry和其他phythread已经占用的rs entry, 以及刚被回收，还没有empty的entry(intransit),是否超过了scheduler的容量
+                 2. setting_rob_shared, scheduler的entry数与rob的entry数必须相等
+                    计算当前phythread已经分配的entry + 其他phythread分配的大于最小配额的entry + 其他phythread的最小配额 entry，查看是否大于scheduler的大小
+                    最小配额计算： scheduler_size / setting_rob_shared_min_frac(4)
+   2. scheduler的结构
+      1. scheduler的分配、释放机制
+         0. 与scheduler相关的管理结构
+            1. scheduler_unfused_active_entries[sched][phytid]
+               scheduler_active_entries[sched][phytid]
+               统计phythread在sched上分配的entry个数，分别按照uop/unfused uop统计
+            2. scheduler_unfused_total_active_entries[sched]
+               scheduler_total_active_entries[sched]
+               统计sched分配的所有phythread的entry个数，分别按照uop/unfused uop
+            3. unified_scheduler_unfused_active_entries[phytid]
+               unified_scheduler_active_entries[phytid]
+               统计phythread分配的所有sched上的entry个数，分别按照uop/unfused uop
+            4. scheduler_write_port_used[sched]
+               统计sched当前T被分配了几个entry
+         1. 分配机制
+            没有看出setting_new_rs_fusing(1)和!setting_new_rs_fusing的情况下区别，对于exec_at_rat的uop都不会进入rs
+            更新0中的相关管理结构, 对于目前的设计，rs entry的分配单位为unfused uop, 也就是fused uop分配到相同的rs entry
+         2. 释放机制
+            更新0中的相关管理结构，同时如果设置了setting_reclaim_rs_latency(0)，那么将相应释放的rs放入到q_intransit_rs[tid]中
+            目前的设计，rs entry的回收单位为unfused uop
+      2. port的绑定
+         0. port的bind的管理结构
+           1. 用于allocate阶段的分配
+              execport_decaying_counters[port]
+                  统计计数，当上一个cycle execport为free时，counter -= setting_pb_decay_dec_amount(1), !free, counter += setting_pb_decay_inc_amount(2), counter的区间范围为[0, setting_pb_decay_max_amount(20)]; 这个counter用于pick_ll_decaying_execport的算法
+              execport_counters[port]
+                  统计计数，当uop分配了exec port后，当前port需要增加的计数 —— 立刻生效，不考虑cycle问题
+                  当指令在port上执行后，进行递减
+                  增加的计数
+                      1. setting_pb_double_branches(false) && execlass==1(branch)， 2
+                      2. setting_pb_double_restricted(false) && only support one port, 2
+                      3. 1
+                  影响如下的port pick算法：
+                      pick_flat_priority_execport
+                      pick_ll_latency_execport
+                      pick_approx_inline_execport
+                      pick_least_loaded_execport
+              execclass_counters[execlass]
+                  统计计数，当uop分配了exec port后，增加对应execlass的计数值 —— 立刻生i下，不考虑cycle问题
+                  当指令在port上执行后，进行递减
+                  影响如下的port pick算法：
+                     pick_ll_class_execport
+              long_lat_counters[port]
+                  统计计数，当uop分配了exec port后，对于latency > 1的uop，增加该counter值
+                  当指令在port上执行后，进行递减
+                  影响如下的port pick算法：
+                     pick_ll_latency_execport
+              cycle_execport_counters[port]
+                  execport_counters的cycle版本，表示上一个cycle的port分配情况(在allocate阶段进行调用)
+              cycle_execclass_counters[execlass]
+                  同上
+              cycle_long_lat_counters[port]
+                  同上
+              phytid_execport_counters[phytid][port]
+                  按照phytid进行记录
+              phytid_execclass_counters[phytid][execlass]
+                  按照phytid进行记录
+              phytid_long_lat_counters[phytid][port]
+                  按照phytid进行记录
+              cycle_phytid_execport_counters[phytid][port]
+                  按照phytid统计上一个cycle的记录
+              cycle_phytid_execclass_counters[phytid][port]
+                  按照phytid统计上一个cycle的记录
+              cycle_phytid_long_lat_counters[phytid][port]
+                  按照phytid统计上一个cycle的记录
+
+              bias_matrix[port][port]
+                  统计一种偏置信息，用于作为exec port pick时的一种偏置参考，bias_matrix[cur_port][alt_port]，cur_port表示当前分配的port不能执行，alt_port表示uop可以选择的另外的available port，当uop在当前cur_port上无法调度执行时，更新bias_matrix，机制如下：
+                  bias_matrix[cur_port][alt_port] += 1
+                  bias_matrix[alt_port][cur_port] -= 1
+                  bias_matrix取值范围为[-10, 10]
+                  影响所有的pick port的算法，在通过算法选择一个port后，需要进行bias再次进行一次选择
+              tmp_execport_loading[port]
+                  临时变量，用于计算每个port上对于不同execlass的平均loading
+                  for execlass support in port:
+                       tmp_execport_loading[port] += execlass_counters[execlass] / possible_ports[execlass]
+                  影响如下的pick port算法：
+                      pick_ll_class_execport
+              tmp_sorted_execports[port]
+                  临时变量，用于按照exexport_counter[port]，对于当前uop的execlass支持的port进行排序，按照counter从小到大排序
+              tmp_bitmask_counts[port_bit(1<<port)]
+                  临时变量，统计一个cycle内execlass的uop进行了几次有效的分配次数，与tmp_sorted_execports[port]配合使用，影响pick_approx_inline_execport算法
+
+              execclass_uoptags[port]
+                  统计变量，用于round_robin的pick port算法，用于计算execlass下一次需要进行分配的exec port (对于possible>1的情况，如果当前uop分配的exec port == execlass将要分配的port，那么uoptags移动到下一个possible的port)
+              addingup_execport_counters[port]
+                  统计变量，每个port的分配计数的单向递增counter，用于计算偏置情况下的port pick
+           2. 用于scheduler阶段的rebind
+              execport_free_last_cycle[port]
+                  表示execport在上一个cycle是否是free
+              execport_ready_counts[port]
+                  表示当前cycle中，execport是否有uop处于ready状态，这个ready是投机的，仅仅表明uop的srcs全部是ready的
+              execport_ready_counts_last_cycle[port]
+                  execport_ready_counts的cycle版本，表明上一cycle中execport是否有uop ready
+              execport_real_ready_counts[port]
+                  类似于execport_ready_counts，区别是不仅srcs是ready的，且指令可以dispatch
+              execport_wb_conflict[port]
+                  表明execport上是否有writeback port的冲突，目前这个已经obsolete，不使用了
+         1. port的bind
+           1. allocate阶段进行bind
+              在allocate阶段进行bind，参考pick_port.txt文档
+           2. scheduler阶段的bind
+              按照uop可以执行的port列表从优先级高的扫描，直到找到当cycle可以调度的port
+         2. port的re-bind
+          用于scheduler阶段无法在已bind的port进行调度的情况
+   3. 哪些uop需要writeback up的回写
+      1. !exec_at_rat (esp_folding | zero/mov-idiom | ...)
+      2. (uop.is_fp && !uop.is_load) || setting_writeback_include_int(1)
+      3. !setting_writeback_ignore_loads(0) || !uop.is_load
+      4. !setting_writeback_ignore_stas(1) || !uop.is_sta
+      5. !setting_writeback_ignore_fast(0) || uop.uop_latency > 2
+      6. setting_writeback_null_reg(1) || !NULL_REG(uop.dst) || uop.wreflags
+
+3. ooo的乱序逻辑
+    0. ooo中的uop各个执行时间点的更新
+       1. cycle_start_schedule     = alloc_cycle + 1,    uop进入rs的时间，可以开始进行调度的时间
+       2. cycle_scheduled           = sched_cycle，表明uop已经ready，并被指令进行schedule，但是还没有考虑scheduler的pipeline latency
+       3. cycle_sources_resolved = resolve_cycle,  每个cycle scheduler都会进行schedule uop的检查，如果发现schedule uop依赖的uop存在replay的情况，那么会被kill；否则，表明uop的所有source已经全部valid，可以真正进入执行单元执行；schedule的uop可能正处于scheduler pipeline的各个stage
+       4. cycle_removed_sched   = enter-exec_cycle，表明uop进入执行单元的时间，也是uop从scheduler删除的时间
+       5. cycle_result_ready        = dispatch_cycle (sched_cycle) + uop_latency，表明uop从schedule之后，多长时间后可以进行spec wakeup依赖的uop
+       6. cycle_exec_known_bad = exec_cycle + uop_latency - setting_sched_clock(2), 表明uop在什么时候送出cancel(invalid)信号，目前为执行完成时
+       7. cycle_result_safe           = exec_cycle + uop_latency + setting_replay_latency - setting_sched_clock, 表明uop在什么时候result是可信的，不会再次replay，safe >= completed (short-latency的uop需要staging到checker阶段进行结果check)
+       8. cycle_exec_started         = exec_cycle，表明uop刚刚进入exec unit，准备开始执行
+       9. cycle_exec_completed   = exec_cycle + uop_latency - setting_sched_clock，表明uop进入执行单元后，多长时间执行完毕，进入complete stage进行回写，但是结果不一定是safe；在!replay的情况下，div uop进行div unit的释放，branch uop进行beuflush
+      10. cycle_replay                  = replay_cycle，表明uop通过replay loop进行redispatch的时间
+      11. cycle_retire_ready         = cur_cycle - setting_retire_latency(2)，表明uop已经可以进行retire的时间
+      12. cycle_retired                 = retire_cycle，表明uop retire的时间
+      13. cycle_store_completed  = cur_cycle,  表明store uop从store buffer写出到dl1的时间
+      14. cycle_split_reg_finished = split_register_free_time[split_reg]，仅仅用于serialize_split的情况下，用于表明split reg何时free
+    1. ooo中rs的schedule逻辑
+       uop从alloc module分配了uaq，继而分配了rs或是直接分配了rs后，每个cycle开始从oldest的rs单元开始尝试进行schedule
+       rs单元为多个phythread共享，顺序按照进入rs的时间顺序排序
+       每个cycle最多调度rs的read_port这么多个uop；其中，mob_scheduler也占用read_port的带宽。目前配置的read_port为6，即每个cycle可以调度6个uop到不同的execport
+        -------------------------------------------------------------------------------------------------------------------------
+        ready check
+        1. uop的 !ready的检查
+           对于已经check过的uop，如果之前不能schedule，说明存在dependent还不ready，不能进行调度
+           1. 检查之前依赖的dependent是否已经ready(dependent = depent_r.cycle_result_ready)
+               1. 不ready，进行port rebind
+               2. ready，说明一个依赖的uop已经不依赖了，继续查看是否有新的依赖，步骤2
+        2. uop的ready检查
+           根据alloc阶段计算出来的dependency关系，针对每一个src op查看是否满足ready的条件(cycle_result_ready >= cur_time)
+           对于不ready的情况，考虑port rebind
+           a. 对于xargv_mfp(1)的情况，说明考虑了memory forwarding，则考虑到DEP_STD
+           b. 对于!xargv_mfp，考虑到DEP_STA
+           对于如下两种情况，不进行ready的检查，强制认为已经ready
+               1. 对于setting_drain_scheds_on_beuflush(0) && bogus的uop
+               2. setting_trivial_op_detection(0) && r.extratiny_op的uop
+           1. 对于memory forwarding预测错误的uop，将DEP_STD修改为预测的std rid
+           2. 对于sched_ld_past_std(1)，不考虑DEP_STD的依赖
+           3. 对于sched_ld_past_sta(1)，不考虑DEP_STA的依赖
+           4. 计算uop与依赖的uop之间是否为interstack forwarding，如果是，考虑interstack delay
+           5. 对于依赖的uop的指令latency为1cycle的情况，需要特殊考虑cam wakeup的delay，setting_cam_schedule_delay(0) && !(setting_overlap_interstack_and_cam_bubbles(1) && interstack_delay) {针对这种情况，再看下专利}
+           6. 查看当前依赖的uop是否满足ready的条件
+               1. dep在uaq中 —— false path，目前配置，不经过uaq
+               2. !setting_split_sched_exec(1) && dep.in_scheduler —— false path，目前配置
+               3. dep.cycle_result_ready + extra_latency{interstack_delay} < cur_time，说明还不满足ready的时序要求
+               4. !dep.cycle_result_ready，说明dep还没有被调度
+               5. dep依赖于replay的uop，且已知结果不safe，dep不是bogus
+               6. 当前是fp操作
+                  1. fp_ops_wait_srcs_safe(0) || (fp_load_dependents_held_in_ssu(0) && dep.is_fpload)
+                  2. dep.cycle_result_safe == -1，表明dep的结果还没有safe
+                  3. 或者当前uop replay后(cur_time + replay_latency(12) < dep.cycle_result_safe + extra_latency)
+               标记当前dep为uop的last_dependent
+               对于等待DL1_MISS的load uop
+                   1. setting_remove_uops_waitmiss_rs(0)，如果符合remove_waitmiss_rs的条件，则将uop从rs中移除 {schedule.cc: 2423}
+        3. rob read stall
+           对于需要从rob读取相应op的uop来说，在调度时需要考虑对应的操作数是否已经read
+           1. op in rob
+              alloc_time + setting_rob_read_dispatch_delay(2) > cur_time
+           2. 对于ld/st
+               1. op_f in rob
+                   alloc_time + setting_rob_read_dispatch_delay(2) + setting_rob_read_src_f_dispatch_delay(2)  > cur_time
+               2. op_f in rrf
+                   alloc_time + setting_rob_read_src_f_dispatch_delay(2) > cur_time
+        ------------------------------------------------------------------------------------------------------------------------
+        4. 如果当前uop还在执行过程中 —— ??如何出现这种情况??
+        5. 进行execport的动态绑定
+           1. setting_bind_execport_at_alloc(1) && (!setting_pb_dynamic_binding_for_ldsta(false) || !(load || sta))
+               如果当前execport已经被占用(dispatch_port_busy[port][sched])，那么返回EXECPORT_INVALID
+           2. 对于lock load，是否需要bind到特定的执行端口setting_pb_force_lock_load_to_port(3)，目前设置为bind到ld_st_agu1，需要判断port是否已经占用
+           3. 按照uop的execclass可以执行的execport，从高优先级开始scan，直到找到一个没有占用的port；如果没有找到，那么返回EXECPORT_INVALID
+        6. uop的latency的计算
+           计算每种不同类型的uop的预估执行latency
+           1. !div|ld|sta|std
+               按照配置设置的latency，参照port_map.dump
+               1. setting_slow_small_rotates(0)
+                  1. xrol | xrcr, oz=byte/word
+                      setting_slow_small_rotates(0)
+           2. ld|sta|std
+               1. sta
+                   sta_ld_latency(0)
+               2. int_std
+                   int_std_fwd_latency(2)
+               3. fp_std
+                   fp_std_fwd_latency(2)
+               4. fp_load
+                   setting_fpload_latency(8)
+               5. int_load
+                   setting_l1hit_latency(8)
+               6. 对于同cycle进行调度的第2个以后的load uop
+                   load_latency + setting_multiple_load_additional_latency(0)
+               7. 对于4B对齐的load
+                   load_latency -= setting_no_alignment_savings(0)
+               8. load.mem_renamed &&  setting_mrn_0cycleld(0)
+                  0
+            3. div，只针对float div
+               1. !variable_latency_divide(1)
+                  返回配置的latency
+               后续具体看schedule.cc:1864
+               2. fdiv
+               3. fsqrt
+        7. extratiny op的识别, 具体看schedule.cc:2176
+        8. sched cond check，任意一个条件不满足，则不能dispatch，但是已设置的条件有效
+           1. safe_schedule_only(0)，查看src_safe stall
+               1. !bogus uop
+               2. !(setting_trivial_op_detection && uop.extratiny_op)
+               3. !src op safe
+                  1. 检查uop的所有src(一直到DEP_STA，不包括DEP_STD)
+                  2. load && sched_ld_past_sta(1)，跳过DEP_STA
+                  3. setting_ignore_i2a_dep_sched(0)，对于uop来自于UAQ_MEMORY，dep_r来自于UAQ_GENERAL，跳过
+                  4. 如果dep.cycle_result_safe == -1 || cur_time + setting_replay_latency(12) < dep.cycle_result_safe + extra_delay(0) + setting_bb_use_fp_inter_latencies(0)，则不是safe
+           2. memory disambiguation的stall
+               1. !bogus uop
+               2. uop.dependent_on_older_stas (alloc阶段计算的predicted或是golden的不存在依赖sta)
+               3. !(load && sched_ld_past_sta(1))
+               4. !(srcs[0] == SS && setting_sta_no_sched_guarding_ss(0))，sta对于访问stack的load不进行unknown sta的保护
+               5. 依次查找rob中load之前的sta
+                   对于存在golden的std forwarding && mtf，extra_latency = sta_ld_fwd_penalty(0)
+                   1. cur_time < dep.cycle_result_safe + extra_latency || !dep.cycle_result_safe，相应的sta还没有safe
+                   2. dep已经确定不是safe的(known_bad_exec) && !dep.bogus
+                   将当前的sta标记为uop需要解决的依赖
+           3. writeback port的stall，setting_writeback_ports_enable(1)
+               1. port == EXECPORT_INVALID, 不check
+               2. 对于需要进行writeback的uop
+                  1. 预估uop的完成时间 cycle_exec_complete = cur_time + uop_latency + dispatch_latency - sched_latency + rs_to_stack_latency[port]
+                  2. 预估uop需要占用的time slot = cycle_exec_complete % (max_uop_latency + setting_replay_latency(12))
+                  3. 查看对应的time slot是否已经被占用 (dispatch_wb_used_rid/phytid[index][sched][port])，且不是自己
+                      1. setting_reserve_future_wb_replace_younger(0), 如果未来预留的uop{future.cycle_future_wb_reserved != 0} younger than uop，则已预留的进行writeback port释放 (被抢占)，由当前uop进行writeback
+                      2. others, 失败
+                         1. setting_bind_execport_at_alloc(1)，标记pb.execport_wb_conflict[port] = 1
+                         2. 尝试进行uop rebind
+                         3. 尝试进行未来wb port的预留
+                            预留的条件
+                               1. setting_reserve_future_wb_port_on_stall(0)
+                               2. uop.cycle_future_wb_reserved == 0
+                               3. uop.uop_latency == setting_sched_clock，按照当前配置为执行周期为1cycle指令
+                               4. setting_reserve_future_wb_port_on_stall && 当前的uop是rs中对应phythread最老的
+                            满足上述条件，尝试进行预留
+                               1. 计算超前预留的ahead的时间区间 [start, stop]
+                                   stop = setting_reserve_future_wb_cycles_ahead(10) (5cycle) - sched_latency(2)
+                                   start = setting_reserve_future_wb_first_avail(0) ? setting_sched_clock : stop
+                               2. 如果未来的time slot没有占用，那么uop进行占用(dispatch_wb_used_rid/phytid[index][sched][port])
+                                  uop.cycle_future_wb_reserved = new_cycle_exec_complete
+                                  uop.future_wb_execport = execport
+                               3. 否则，setting_reserve_future_wb_replace_younger(0)，如果已经预留的younger than uop，那么改成uop进行预留
+           4. slow_lock的stall
+               1. setting_do_slow_locks(0) && !setting_bb_dont_block_locks_in_sched(0){not block in rs, but replay them}
+               2. lock_load
+               3. !oldest || 存在outstanding的store, stall
+               4. oldest && 没有outstanding的store
+                   1. lock_schedule_time == 0, stall
+                       lock_schedule_time = cur_time + 4 * setting_replay_latency(12)
+                   2. lock_schedule_time > thread_cycle, stall
+                   3. others, not stall
+           5. div unit的stall，idiv单元有depipelined_idiv_units(1)， fdiv只有1个单元(在目前的配置中，fdiv与idiv为共享div单元)
+             idiv单元处理
+               1. depipelined_idiv(1)
+               2. !bogus
+               3. uop.idiv || (unified_divider(1) && uop.fdiv)
+               4. !setting_trivial_op_detection(0) || (!uop.extratiny_op && !uop.extratiny_op_move)
+               5. 扫描所有的idiv单元，根据最后情况进行分析
+                  1. 如果某个idiv_owner[type][unit]为当前uop，说明uop之前被调度执行过，且该unit被uop调度后，一直没有别人使用
+                      1. 存在idiv_reservation[type][unit]的uop，且older than当前uop，在别的idiv单元上idiv_owner[type][unit]没有younger than当前uop的uop调度过，stall
+                          1. 当前idiv unit立即可用 idiv_next_time[type][unit] = cur_time - 1
+                          2. 清除当前idiv_owner[type][unit]
+                      2. otherwise, no stall
+                   2. 选择最为可能占用的idiv单元
+                      1. uop本身已经处于reservation状态，或者某个idiv单元的reservation为空，且是ready时间最近的unit
+                      2. 选择reservation中最younger的那个单元作为replace单元
+                   3. 如果该单元已经存在reserveation的uop，且older than当前uop，stall
+                   4. 如果该单元目前正在使用idiv_next_time[type][unit] >= cur_time, stall
+                      1. 设置uop为该单元的reservation
+                   5. otherwise，no stall
+             fdiv单元处理类似，且只有一个单元，更简单
+               1. depipelined_fdiv(1)
+               2. !bogus
+               3. !unified_divider(1)
+               4. fp_div
+               5. !setting_trivial_op_detection(0) || (!uop.extratiny_op && !uop.extratiny_op_move)
+               6. owner就是当前uop且单元没有预留, no stall
+               7. 预留uop older than当前uop, stall
+                   1. 如果owner就是当前uop
+                       1. 单元立即可用
+                       2. 清除owner
+               8. 单元还处于使用状态，stall
+                   1. 单元没有预留，设置uop为当前预留
+                   2. 单元有预留，但是younger than当前uop，设置uop为当前预留 
+           6. setting_sched_loads_in_order(0)，load的调度必须按照in-order的顺序调度，没有实现
+           7. execport为INVALID_EXECPORT，没有schedule可执行的execport
+               1. 尝试进行port rebind
+        9. ooo的dispatch逻辑
+           当uop已经ready，且满足所有调度要求的时候
+           1. mdisamb table的访问，判断load是否可以超前store进行执行
+           2. 对于setting_replay_loop(0)的情况，从rs中clear对应的uop entry
+           3. 更新uop的cycle_result_ready，用于wakeup相应的依赖指令
+               0. ready = cur_time + uop_latency
+               1. 对于mob_schedule的uop，!serializing_splits(0) && split_load，如果split_reg != SPLITHIGH，ready = 0
+               2. 对于extratiny uop，ready = cur_time + latency(xadd)
+               3. 对于mob schedule的uop，ready -= setting_dispatch_latency(6) - setting_mob_dispatch_latency(6)
+               4. 更新uop.cycle_result_ready
+                   1. 对于mob schedule的uop，uop.recent_ld_dep_vector[MOB/RS] != 0的情况，设置uop.cycle_result_ready_2nd_sched
+                    2. 更新cycle_result_ready = ready
+           4. setting_enable_rob_read_ports(1) && !setting_set_arf_at_writeback(1)，进行arf_bit的设置
+           5. 设置dispatch_port[sched][port]的占用，=!setting_no_sched_port_limitation(0)
+               1. 对于setting_full_portbinding(1)，则port被某个sched占用后，其他sched不能调度
+           6. 设置uop.cycle_scheduled = cur_time
+           7. 对于首次调度的uncachable访问，invalidate dl1/ul2
+           8. 处理dispatch阶段的replay，对于目前的配置{setting_split_sched_exec(1)， setting_replay_loop(0)}不会有replay
+               1. 更新uop.cycle_exec_completed的完成时间
+                  条件：uop.cycle_result_safe == -1，表明uop还没有获得safe的result
+                  cycle_exec_complete = cur_time  +  uop_latency + setting_dispatch_latency - setting_sched_clock + rs_to_stack[uop]
+               2. setting_writeback_ports_enable(1)，对于需要进行回写的uop，进行dispatch阶段的writeback port的预留处理
+                  1. 根据uop.cycle_exec_complete计算time slot
+                  2. 判断当前time slot是否为自己预留的，是的话
+                     1. 去掉uop的预留信息
+                  3. 不是自己预留的 —— 这条路径不会走到，原来的实现中，wb reserve不作为schedule的条件，而是dispatch的条件，不行的话，相应的uop进行REPLAY_CAUSE_WB_CONFLICT，使用replayq
+                      1. wb_resv.cycle_result_safe != -1 || older than 当前uop
+                          当前uop进行replay，cycle_exec_completed = 0
+                      2. 抢占wb_resv的reserved的time slot，wb_resv进行replay，且设置cycle_exec_completed = 0, cycle_result_safe =-1
+                  4. 如果当前uop可以进行writeback port的预留，设置port的预留信息(dispatch_wb_used_rid/phytid[index][sched][port])
+                      如果uop是抢占方式获得的writeback port预留，且自身有未来的预留信息cycle_future_wb_reserved，则将cycle_future_wb_reserved预留信息消除
+               3. 对于使用div unit的uop，进行div unit的预留 —— 原来的实现中，div不作为schedule的条件，而是dispatch的条件，在dispatch查看是否可以占用div单元，不行的话，进行REPLAY_CAUSE_DIV_BUSY，使用replayq
+                  1. depipelined_idiv(1) && !bogus && (uop.is_idiv || (unified_divider(1) && uop.is_fdiv)) && !setting_trivial_op_detection || (!r->extratiny_op && !r->extratiny_op_move)
+                     1. idiv
+                        更新next_time[type][unit] = cur_time + uop_latency - pipelined_portion_of_divider(0) - 1
+                        更新owner为当前uop
+                     2. fdiv
+                        更新next_time[type][unit] = cur_time + variable_latency_divide - pipelined_portion_of_divider(0) - 1
+                        更新owner为当前uop
+                  2.  depipelined_fdiv(1) && !bogus && !unified_divider(1) && uop.is_fdiv && !setting_trivial_op_detection || (!r->extratiny_op && !r->extratiny_op_move)
+                     更新next_time[type][unit] = cur_time + variable_latency_divide - pipelined_portion_of_divider(0)
+                     更新owner为当前uop
+           9. 更新known_bad_exec和recent_load_dep，这部分用于real_cancel_exec使用，具体见cancel_exec的流程
+           10. 进行load的wakeup操作
+                1. setting_delay_std_wakeup_of_loads(2), std->load
+                2. setting_delay_sta_wakeup_of_loads(2)，sta->load
+           11. 对于lock_load && !replay
+                1. setting_do_seriesold_base_locks(0) && !bogus && oldest
+                    设置mob_load_lock_sched/uop_num/paddr[tid]，lock_asserted
+                2. setting_do_CPU1_fast_locks(1) && r.speculative_lock && !bogus
+                    设置speculative_lock_in_progress[tid] = 1
+           12. setting_real_cancel_exec(1) && !setting_replay_loop(0), 如果known_bad_exec == cur_time
+                进行执行取消(cancel_exec)
+           13. 否则，进入q_rs_dispatch_rid/q_mob_dispatch_rid
+     2. replayq的调度逻辑， !safe_schedule_only(0) && setting_replay_loop(0)
+         1. 对于bogus的uop
+            设置cycle_result_safe = cur_time + uop_latency + setting_replay_latency(12)，push进入q_safe_replay_rid/phytid
+         2. 对于!bogus
+            进行dispatch uop的逻辑
+     3. mob scheduler的调度逻辑，参见mob.txt
+     4. cancel的逻辑，!setting_replay_loop(0)
+         bogus的uop，只在!setting_real_cancel_exec(1)处理，??按照目前配置，不进行处理??
+         1. 设置cycle_exec_known_bad = cur_time
+         2. 设置uop重新可以被rs进行schedule，uop还没有从rs移除
+         3. 对于uop_latency > setting_replay_latency(12)的uop，立即释放writeback port ????
+             1. 释放dispatch的预留单元
+             2. 释放exec阶段的回写slot —— 不存在，cancel发生在执行前
+         4. 提前释放divider
+             1. next_time = cur_time + setting_div_release_latency(0) - 1
+         5. 对于bogus的uop，push进入q_retire等待retire处理
+         6. setting_do_seriesold_base_locks(0) && lock_load的情况，如果lock_sched为当前的uop，释放schedule时设置的lock_sched
+     5. exec的逻辑
+         连接到rs的schedule逻辑后，属于ooo pipeline的一部分。从目前的配置中，schedule逻辑的表示由两部分q_rs_dispatch/q_mob_dispatch
+         1. 从schedule pipeline中将指令放入到q_arb_to_exec_rid/phytid中进行执行，有两个来源(q_rs_dispatch/q_mob_dispatch)；还有一个q_skid_buffer_rid(目前不讨论)
+            设置execport_busy[sched][port]=1，表示执行阶段execport被占用——execport_busy表示了在执行时的execport被占用，对于MOB这种有内部pipeline的unit，表示pipeline上的竞争，目前没有使用，原因是dispatch时已经决定了多个source不会同时到达execport
+            对于已知的!safe的uop(known_bad_exec)，则不进行执行——这里仅仅是从模拟器中删除，在实际HW中已经被kill掉了
+            1. 对于rs发送的uop
+                1. 表示uop已经不在rs中，并从rs中移除
+                2. setting_bind_execport_at_alloc(1) && !dec_inhibit —— 可以在uop dispatch的时候就更新pb counter(设置dec_inhibit)，目前配置!setting_pb_dec_at_reclaim(0)不支持
+                   1. 更新减少pb counter
+                3. 对于load/sta，如果execport_busy[sched][port]，那么push进入q_skid_buffer_rid/phytid —— 目前配置不支持
+         2. 开始执行exec pipeline上的uop
+            1. bogus的uop && !setting_replay_loop(0)
+                1. !setting_real_cancel_exec(1)
+                    进行cancel的逻辑
+                2. 执行complete的部分逻辑(send_uop_after_exec)
+                   1. cycle_result_safe = cur_time + uop_latency + setting_replay_latency - setting_sched_clock
+                   2. push进入q_replay_safe_rid/phytid的safe_replayq，后续等待retire
+            2. 设置uop.cycle_exec_started = cur_time
+            3. setting_do_seriesold_base_locks(0) && lock_load && !bogus && oldest && !mob_load_lock_sched[tid]
+                设置mob_load_lock_sched[tid]=1，表明正在执行一个lock lock的uop
+            4. 执行相应的uop(主要是mob pipeline)，并更新replay reason
+            5. setting_do_seriesold_base_locks(0) && bogus && lock_load
+               如果当前mob_load_lock_sched[tid]由当前uop设置，则release
+            6. setting_split_sched_exec(1) && sched_ld_past_std(1) && is_std && setting_schedule_from_mob(1)
+               唤醒mob schedule中的load，{rid, REPLAY_CAUSE_ST_FORWARD_INCOMPLETE_ST}
+     6. complete的逻辑
+         根据uop类型指令完成执行后，根据执行结果进行进一步处理
+         1. genernal，所有uop都会执行的操作
+            1. !replay
+               1. cycle_result_safe = cur_time + uop_latency + setting_replay_latency - setting_sched_clock
+               2. 使用idiv unit的uop，释放div unit
+                   1. 更新fpdiv_reservation/fpdiv_owner/idiv_reservation[type][unit]
+                   2. 更新fpdiv_next_time = cur_time + 1，下一个cycle fpdiv unit可以被使用
+               3. 需要回写的uop，使用writeback port进行data的回写到rob (exec_wb_used_rid)，并push进入q_set_arf_bit准备更新arf_bit
+               4. push进入q_replay_safe_rid/phytid的safe_replayq，后续等待retire
+            2. replay
+               1. cycle_known_bad_exec= cur_time + uop_latency + setting_replay_latency - setting_sched_clock
+               2. push进入q_replay_rid/phytid的replayq，等待进行replay
+         2. br指令
+             0. 对于!br的指令，??reset_btflush??
+             1. mispredict
+                1. 根据配置的不同的recovery机制，进行rat的recovery (br_checkpoint/periodic_checkpoint/sequential_upate)
+                2. 进行backend的flush (clean_window)
+                3. 如果mispredict，设置beuflush，push进入q_beuflush[tid]，等待进行frontend flush
+                4. 对于mispredict的phythread，计算是否进行phythread switch
+             2. !mispredict
+                1. 进行br_checkpoint的回收
+             3. !setting_update_bp_at_retire(1)，push进入q_bp_update[tid]准备进行bpu的更新
+         3. load指令
+             1. !replay
+                1. 清除dep.recent_ld_dep_vector[sched][port][from_mob]上的对应index
+             2. replay
+                1. cancel在schedule流水线上的uop
+
+4. rob_arf bit的处理
+   1. !setting_set_arf_at_writeback(1)
+      在uop dispatch的时候进入回填队列
+   2. setting_set_arf_at_writeback(1)
+      在uop complete后，且确定没有replay的情况下，进入回填队列
+   回填队列延迟setting_schedule_to_set_arf_bit(2)后，设置rob_read=true，表示最新的结果在rob中
+
+5. replay/cancel_exec的处理流程
+   1. cancel_exec的判断逻辑 —— 需要与具体的HW结构进行结合
+      当uop执行完毕后，如果存在replay的情况，那么发出cancel信号，用于将scheduler pipeline上的uop进行清除；这里的cancel仅仅考虑了load在mob可能replay的情况。
+      cancel逻辑分为2个部分：
+         1. 流水线上的部分， recent_ld_dep_vector，表明可能有问题的load在pipeline window的位置，后面所有与它有依赖关系的uop会将这个依赖slot标记到自己的vector上；当load确定完成，没有replay，会从依赖的uop上移除对应的slot，否则，如果有存在slot标记的uop都会进行cancel
+         2. queue内的部分， cycle_exec_known_bad，只要这个值不为0且< cur_cycle，说明依赖的uop被调度过，但是存在replay的情况，则相关的uop都不能调度；直到依赖的uop又被进行schedule为止
+   2. replay的逻辑 —— 需要与具体的HW结构进行结合
+      没有实现replay queue，仅仅实现了replay loop，用于将执行结果错误的指令重新送入exec unit进行执行。当replay loop进行dispatch uop的时候，scheduler逻辑停止进行ready uop的schedule
+      在目前的实现中，uop如果出现replay，则push进入q_replay_rid/phytid[sched][port]，等待setting_replay_latency(12)-setting_dispatch_latency(6)=6后，直接进行dispatch逻辑
+
+6. beuflush的backend flush流程
+    当出现branch uop的mispredict的情况下，需要进行frontend和backend的flush，这里描述对于backend部分在mispredict uop之后的uop如何处理的情况
+    进行alloc和ooo部分的资源和流水线状态清理和回收
+    需要进行回收的资源：
+        1. alloc阶段分配的资源
+            1. rob
+            2. sb
+            3. lb
+            4. pb
+            5. alloc private资源
+                1. rsp_cache_valid[tid]
+                2. flag_stall[tid]
+                3. alloc_sleep_reason[tid]
+        2. sched阶段分配的资源
+            1. split reg
+            2. div unit
+            3. pmh
+            4. fillbuffer
+            5. lock
+            6. sleep mob
+            7. rs
+     按序进行ooo的清除处理
+       1. setting_bind_execport_at_alloc(1) && setting_pb_beuflush_reset(1) && setting_flush_scheds_on_beuflush(1)
+          进行pb的clear
+       2. 从当前rob->rob_tail，逐一完成如下动作：
+          1. 设置uop.bogus_time
+          2. setting_instant_reclaim_bogus_buffers(1) && uop_latency >= setting_replay_latency(12) && cycle_exec_completed
+              进行writeback port的release
+          3. setting_flush_uaqs_on_beuflush(1)
+              对于存在于uaq中的uop进行flush
+                  1. 设置cycle_result_safe
+                  2. !setting_instant_reclaim_bogus_buffers(1)，push进入q_retire[tid]，等待进行retire
+                  3. 对于setting_bind_execport_at_alloc(1) && !setting_pb_beuflush_reset && !exec_at_rat && !uop.dec_inhibit
+                      更新(dec)pb相关的计数器
+          4. setting_flush_scheds_on_beuflush(1)
+              对于存在于scheduler中的uop进行flush
+                  1. setting_real_cancel_exec(1) && !setting_replay_loop && !uop.schedulable
+                      执行cancel动作，对应硬件即是消除schedule pipeline上的目前in flight的指令
+                  2. 设置cycle_result_safe
+                  3. 进行lock链表的消除
+                  4. 设置uop.schedulable = 0
+                  5. 从rs中移除对应的uop
+                  6. !setting_instant_reclaim_bogus_buffers，push进入q_retire[tid]等待retire
+                  7. setting_keep_in_scheduler(0)，仅仅针对!split_sched_exec的情况，清除fillbuffer中相应地址的lmb
+                  8. 对于setting_bind_execport_at_alloc(1) && !setting_pb_beuflush_reset && !exec_at_rat && !uop.dec_inhibit
+                      更新(dec)pb相关的计数器
+          5.  对于lock_load，设置phythread[tid].look_for_store_unlock = false
+          6. 清除后续mispredict br uop的mispredict信息
+          7. setting_instant_reclaim_bogus_buffers(1)
+              设置对应uop.retirable = 1
+              1. 对于load，更新real_num_lb[tid], push进入q_reclaim_lb[tid]
+              2. 对于sta，更新q_reclaim_sb[tid], push进入q_reclaim_sb[tid]
+              3. 对于std, 更新stdid_to_robid[phytid][stdid]
+              4. 对于consume rob的uop
+                 更新real_num_rob[tid]，push进入q_reclaim_rob[tid]
+              5. 更新branch_color信息——对应br checkpoint
+              6. allocate_restrict_num_fcw_writes(1)，??对于uop.dst == Uop_Regnum_FCW0??
+                  减少num_fcw_writes[tid]
+              7. 回收backend资源
+                  1. div unit
+                  2. split reg
+                  3. sched_lock[tid]
+      3. 对于setting_instant_reclaim_bogus_buffers，立即进行rob的更新，更新到mispred br uop
+      4. 进行alloc阶段的清理
+          1. 清理内部buffer
+          2. 所有控制信号复位
+      5. 进行sleep mob的清理
+          1. !setting_move_mob_on_beuflush(1){beuflush阶段是否清除mob schedule中的load}
+              唤醒当前phytid对应的load，进入pipeline后因为bogus马上complete，进行retire
+          2. setting_move_mob_on_beuflush
+              对于属于当前phytid的mob scheduler中的load
+              1. !setting_instant_reclaim_bogus_buffers, push进入q_retire[tid]
+              2. 释放fillbuffer/split reg/pmh
+              3. 设置cycle_result_safe = cur_cycle + r->uop_latency + setting_replay_latency
+              4. setting_do_seriesold_base_locks(0) && lock_load
+                  清除mob_load_lock_sched[tid]
+          3. 清除q_mob_st/ld_scheduler[port][phytid]中等待mob schedule的uop
+
+7. rob的phythread的几种分配方案
+   1. setting_rob_partitioned(1)——静态分配方案
+      rob在active的phythread间进行均匀分配，对于目前为phythread_rob_size = setting_rob_size(128) / num_active_phythreads
+   剩下两种情况，phythread_rob_size = setting_rob_size
+   2. setting_rob_shared(0)——rob在多个phythread间共享
+   3. setting_rob_dynamic(0)——rob在多个phythread间竞争使用
+
+问题：
+1. replay的latency为什么比schedule的latency大
+2. safe replay为什么存在
+3. 为什么cancel的时候release wbport需要在大于setting_replay_latency的情况下release
+4. btflush做什么的？(!br && uop != invalid_page)

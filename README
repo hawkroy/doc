@@ -1,6 +1,8 @@
 DOC structure:
+  bookmark	  book note
+  diary		  personal thinking
   jupyter         python notebook & code
   misc            env setup, BKMs & other misc
-  project         self study project
-  tech            new cs/ee techs for memo, opensource code analysis
+  proj            self study project, opensource proj analysis
+  tech            cs/ee techs for memo, opensource code analysis
   work            routine job work memo

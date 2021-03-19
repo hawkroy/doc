@@ -55,15 +55,114 @@ ghcup set x.x.x		#设置当前使用版本
 # install cabal, cabal for haskell package manager
 #
 ghcup install-cabal			#安装cabal到INSTALL_BASE/cabal
+
+# change ${CONFIG_FILE} to alternative path, and favourite path
+cabal user-config init --config-file=${CONFIG_FILE}
+gvim /path/to/config
+# change any path to your favourite path
+
+# alias cabal
+alias cabal='cabal --config-file=${CONFIG_FILE} --sandbox-config-file=${SANDBOX_CONFIG_FILE}'
+
+# change config file, modify mirror to tsinghua
+# default is ~/.cabal/config := ${CONFIG_FILE}
+gvim ${CONFIG_FILE}
+​```config
+repository mirrors.tuna.tsinghua.edu.cn
+  url: http://mirrors.tuna.tsinghua.edu.cn/hackage
+# comment official mirror
+-- repository hackage.haskell.org
+--   url: http://hackage.haskell.org/
+--   -- secure: False
+--   -- root-keys:
+--   -- key-threshold:
+
+remote-repo-cache: /home/hawkwang/opt/haskell/cabal/packages
+-- local-repo:
+-- logs-dir: /home/hawkwang/.cabal/logs
+world-file: /home/hawkwang/opt/haskell/cabal/world
+-- store-dir: ??need change??
+build-summary: /home/hawkwang/.cabal/logs/build.log
+​```end of config
+
 cabal new-install --install-dir=/path/to/cabal --install-method=copy|symlink cabal-install #更新cabal到最新
 
-# cabal config file locate in ~/.cabal/config
+# cabal config file locate in ${CONFIG_FILE}
 cabal update 	#更新已有的package
 
 #
 # install stack, stack for haskell project manage tool
+# another tool compared to cabal
 #
+# get get_stack bash script
+wget -qO- https://github.com/commercialhaskell/stack/tree/master/etc/scripts/get-stack.sh > /path/to/stack/bin/get_haskell_stack
+chmod +x get_haskell_stack
+# download stack program to /path/to/stack/bin
+get_haskell_stack -d /path/to/stack/bin
 
+# configure stack running dir
+export STACK_ROOT=/path/to/stack
+# run stack --no-install-ghc path to generate stack running dir contents
+stack --no-install-ghc path
+# modify ${STACK_ROOT}/config.yaml to change mirrors to tsinghua
+gvim ${STACK_ROOT}/config.yaml
+​```yaml
+# for template using
+templates:
+  params:
+    author-name: hawkwang
+    author-email: wang09_224@163.com
+    copyright: GPLv2
+    github-username: hawkroy
+    category: Development
+
+# for mirror change
+###ADD THIS IF YOU LIVE IN CHINA
+setup-info-locations: ["http://mirrors.tuna.tsinghua.edu.cn/stackage/stack-setup.yaml"]
+urls:
+  latest-snapshot: http://mirrors.tuna.tsinghua.edu.cn/stackage/snapshots.json
+snapshot-location-base: https://mirrors.tuna.tsinghua.edu.cn/stackage/stackage-snapshots/
+
+package-indices:
+  - download-prefix: http://mirrors.tuna.tsinghua.edu.cn/hackage/
+    hackage-security:
+        keyids:
+        - 0a5c7ea47cd1b15f01f5f51a33adda7e655bc0f0b0615baa8e271f4c3351e21d
+        - 1ea9ba32c526d1cc91ab5e5bd364ec5e9e8cb67179a471872f6e26f0ae773d42
+        - 280b10153a522681163658cb49f632cde3f38d768b736ddbc901d99a1a772833
+        - 2a96b1889dc221c17296fcc2bb34b908ca9734376f0f361660200935916ef201
+        - 2c6c3627bd6c982990239487f1abd02e08a02e6cf16edb105a8012d444d870c3
+        - 51f0161b906011b52c6613376b1ae937670da69322113a246a09f807c62f6921
+        - 772e9f4c7db33d251d5c6e357199c819e569d130857dc225549b40845ff0890d
+        - aa315286e6ad281ad61182235533c41e806e5a787e0b6d1e7eef3f09d137d2e9
+        - fe331502606802feac15e514d9b9ea83fee8b6ffef71335479a2e68d84adc6b0
+        key-threshold: 3 # number of keys required
+
+        # ignore expiration date, see https://github.com/commercialhaskell/stack/pull/4614
+        ignore-expiry: no
+​``` end of yaml
+wget -qO- https://github.com/commercialhaskell/stackage-content/tree/master/stack/global-hints.yaml > ${STACK_ROOT}/pantry/global-hints-cache.yaml
+
+# configure template
+cd ${STACK_ROOT}
+git clone https://github.com/commercialhaskell/stack-templates.git templates
+
+# modify ~/.bashrc to alias stack
+#   - using system-ghc
+#			ghc should in ${PATH}
+#   - change local-bin-path to ${STACK_ROOT}/bin
+#		- set resolver to system-ghc version
+#			check https://www.stackage.org/ for lts-xxx mapping ghc-xxx version
+alias stack='stack --system-ghc --resolver lts-14.27 --local-bin-path ${STACK_ROOT}/bin'
+
+# stack usage
+# [template-name] can be any git.website[gitlab, github] or local path
+stack new new-prj [template-name]   # create a new prj
+stack setup		# setup build environment, by downloading new ghc
+stack build   # build prj
+stack exec exec-name
+stack clean		# prj clean
+stack purge		# remove package
 ```
 
 ## Ocaml
@@ -76,6 +175,7 @@ ocaml使用opam包管理工具管理compiler和包
 
 ```sh
 export OPAMROOT=/path/to/ocaml/root
+# opam init will automatically install a default compiler, if no `--bare` option used
 opam init --disable-sandboxing		# if no --disable-sandboxing, should install bubblewrap package
 eval `opam env`
 opam switch create 4.10.0
@@ -177,5 +277,11 @@ vi config.sh
 sudo apt install gnat-6		# ada environment
 ```
 
+## Rust
 
-
+```sh
+# download initscript
+curl https://sh.rustup.rs -sSf | cat > rustupinit
+# set environment
+CARGO_HOME=/path/cargo RUSTUP_HOME=/path/rustup ./rustupinit
+```

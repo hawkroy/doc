@@ -1,0 +1,28 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. store在retire阶段的处理流程
+   1. senior_store，store uop retire后，store buffer request store pipeline之前的状态
+       这部分的处理大部分时间不影响主流水线的latency，属于后半部的后台处理方式。
+       senior store在store buffer中顺序进行处理
+   2. retire_store，进入senior状态的store，在进行arbitration后，访问store pipeline进行store的写入处理，这一部分的功能属于mob，在mob.txt中介绍
+
+2. senior_store的处理
+    处理周期：setting_store_clock(2)
+    策略：需要在多个phythread之间进行仲裁处理，采用PHYTHREAD_INTERLEAVE模式
+    仲裁条件：
+        1. 存在outstanding的store
+        2. !head.issue || !next(last_issued).issue
+        3. issue_count < 1
+        4. issue_rate < setting_store_dispatch_rate(1)
+    流程——这里仅仅讨论store pipeline化的流程：
+        1. 对于当前等待issue的store，满足如下几个条件才能进行
+            1. cur_cycle >= retire_cycle + store_pipeline_overhead(4)
+            2. more check, 仅仅满足一个即可
+                1. bogus
+                2. !split
+                3. split && cur_cycle >= retire_cycle + store_pipeline_overhead(4) + split_store_pipeline_overhead(8)
+        2. store可以执行，标记当前store.issued=1，发送到q_senior[tid]，进行store pipeline流程的模拟
+            1. 对于bogus的store && setting_fast_bogus_senior_drain(0)
+                不算作一次有效的store commit
+        
+   

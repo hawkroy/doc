@@ -1,0 +1,10 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. frontend pipeline结构
+2. fetch结构和流程
+3. bpu结构
+4. ild流程
+5. decode流程
+6. stack engine
+7. macro-fusion/micro-fusion
+8. 与phythread相关的资源分配和流程处理

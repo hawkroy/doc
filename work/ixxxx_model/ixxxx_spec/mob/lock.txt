@@ -1,0 +1,137 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+lock的实现
+
+   0. lock在处理器中的一般管理
+       1. allocate阶段
+           lock_table[tid][setting_max_rob_size]，记录当前phythread中allocate阶段看到的lock，in-order
+           对于lock_load/sta_unlock uop
+              1. lock_load uop会push进入lock_table[tid]，并标记当前phythread.look_for_sta_unlock，关联lock entry
+              2. 遇到sta_unlock uop，如果phythread.look_for_store_unlock，则标记sta.sta_unlock，关联lock entry
+              3. 遇到std uop，如果phythread.look_for_store_unlock，标记std.allocator_unblocking_store，取消phythread.look_for_store_unlock标记
+       2. mob schedule / replay阶段
+           设置mob.lock_scheduled = 1
+       3. retire / beuflush / reset_rob
+           1. 清除mob.lock_scheduled = 0
+           2. 清除lock_table
+   
+   1. 多核间的lock同步处理——目前实现不完整
+      1. 通过构建全局的LockInfo结构进行全局的lock定序，这类似于bus lock，而不是cache lock，因为cache lock允许不同的处理器乱序的锁定不同过的cacheline，而不需要一个全局序列
+      2. 全局序的构建——代码实现不完整
+          1. 在retire阶段，lock_load uop为!bogus && retiring
+             1. 如果当前的phythread是全局lock序上的head，则设置为in_lock状态，表明当前的phythread在进行Lock处理
+             2. 否则，记录当前引起lock的lock_load，设置当前phythread为wait_lock状态
+          2. 在retire阶段，如果遇到sta_unlock信号，如果当前phythread处于in_lock状态，则标记相应的store_buffer为in_lock，设置当前phythread为!in_lock状态
+             1. 在store_buffer commit到cache后，从全局lock序中删除当前的phythread的lockinfo
+             2. 或者当前sta_unlock出现fault，则直接设置phythread为!in_lock状态，从全局lock序中删除当前的phythread的lockinfo
+          3. 在retire准备阶段，如果当前phythread处于wait_lock状态，则当前phythread不能retire——保证lock_load retire后，如果全局定序失败，后续的uop不能retire
+      3. 每周期进行lock状态的检查
+             1. 对于处于wait_lock状态的phythread，如果其当前的lockinfo已经是当前全局lock序中最老的，则将当前phythread reset pipeline，从当前的rob.head处re-fetch执行，同时设置phythread为!wait_lock状态——这样设计的原因：引起in_lock置位的lock_load指令已经从流水线中被retire了
+             ??问题：没有看到全局lock序是怎么更新的??这部分代码有缺失
+
+   2. setting_do_slow_locks(0)
+      1. schedule阶段
+          1. !setting_bb_dont_block_locks_in_sched(1)
+              等到oldest && 不存在outstanding的store && lock_schedule_time <= cur_cycle (lock_schedule_time = cur_cycle + 4*setting_replay_latency)
+              才能调度执行
+      2. exec阶段
+          1. setting_bb_dont_block_locks_in_sched(1)
+              1. 如果当前oldest && 不存在outstanding的store
+                  1. lock_safe_time <= cycle_cycle (lock_safe_time = cur_cycle + setting_at_retire_lock_replay_count * setting_replay_latency)， REPLAY_CAUSE_LOCK
+              2. !1，则更新统计信息， REPLAY_CAUSE_LOCK
+
+   3. setting_do_seriesold_base_locks(0)
+      1. allocate阶段
+         无特殊处理
+      2. exec阶段
+         0. schedule阶段
+            lock_load没有dispatch replay && oldest uop && !bogus
+                1. 设置相应phythread的lock标记
+                    1. mob_load_lock_sched[tid] / mob_load_lock_paddr[tid] / mob_load_lock_uop_num[tid]
+                    2. 设置core.lock_asserted = 1
+         1. cancel机制
+            如果cancel的lock_load == mob_load_lock_uop_num[tid]
+                 1. 清除相应phythread的lock标记
+                     mob_load_lock_sched[tid] / mob_load_lock_paddr[tid] / mob_load_lock_uop_num[tid]
+                 2. 设置core.lock_asserted = 0
+         2. mob的schedule/replay阶段
+            1. lock_load wakeup条件
+                1. oldest && 不存在outstanding的store && !num_unobserved[tid]
+                2.  && core.lock_asserted==0
+                3. && lock_safe_time >= cur_cycle
+                    lock_safe_time = cur_cycle + setting_seriesold_base_lock_wakeup_penalty(1)
+            2. lock_load的调度replay
+                1. 对于已经wakeup的lock_load，如果存在正在执行的lock_load，且paddr不相同，则当前lock_load排到mob_ready的最后一个
+                2. 对于setting_hack_seriesold_locks(0)，当前rob.load && !rob.lock_load，如果mob.lock_scheduled，则mob不能调度load
+            3. sta_unlock必须oldest，才可以wakeup
+         3. pre-exec阶段
+            1. 设置相应phythread的lock标记
+                1. mob_load_lock_sched[tid] / mob_load_lock_paddr[tid] / mob_load_lock_uop_num[tid]
+                2. 设置core.lock_asserted = 1
+         4. exec阶段
+            1. !oldest && 存在outstanding的store， 触发REPLAY_CAUSE_LOCK
+            2. sta_unlock && !oldest，触发REPLAY_CAUSE_STA_UNLOCK
+            3. 对于younger than lock_table[tid][lock_end[tid]]（当前phythread最老没有retire的lock操作）中的load操作
+                1. !setting_hack_seriesold_locks(0)
+                2. setting_hack_seriesold_locks(0) && mob.lock_scheduled
+                触发REPLAY_CAUSE_YOUNGER_LOAD
+         5. post-exec阶段
+            对于lock_load，bogus && lock_load == mob_load_lock_uop_num[tid]
+                 1. 清除相应phythread的lock标记
+                     mob_load_lock_sched[tid] / mob_load_lock_paddr[tid] / mob_load_lock_uop_num[tid]
+                 2. 设置core.lock_asserted = 0
+       3. retire阶段
+            1. 对于执行出现fault的lock_load
+                释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量)
+            2. std.allocator_unblocking_store && !bogus
+                释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量)，表明当前lock指令执行完毕
+        4. beuflush | reset_rob阶段
+            1. 释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量)——不成立，因为总是在oldest执行
+            2. 对于allocate阶段，如果设置了phythread.look_for_sta_unlock，则清除
+       
+   4. setting_do_CPU1_fast_locks(1)
+      1. allocate阶段
+         1. num_lock == setting_number_CPU1_fast_locks(1) && setting_do_single_CPU1_fast_locks(1) && !predictor_lock_contended(tid, s)
+             设置lock_load.speculative_lock=1
+         2. setting_do_CPU1_fast_locks(1) && !setting_do_single_CPU1_fast_locks(1) && !predictor_lock_contended(tid, s)
+             设置lock_load.speculative_lock=1
+         predictor_lock_contended的处理
+            1. lookup(allocate 阶段)，通过查找lock_predictor_table[ setting_lock_predictor_size(32) ]，判断当前lip是否与table中一致，如果一致，则lock_contended
+            2. update(retire 阶段)，setting_CPU1_take_lock_bigflush(1) && head.lock_bigflush && !bogus，更新table，并触发reset_rob
+         3. checkpoint模式，在checkpoint模式下，不进行lock table的更新，HW通过checkpoint进行记录当前lock所处的机器执行环境
+      2. exec阶段
+         0. schedule阶段
+             lock_load没有dispatch replay && s.speculative_lock && !bogus
+                 1. 设置speculative_lock_in_progress[tid] = 1
+         1. mob的schedule/replay阶段
+            1. lock_load执行条件
+                1. oldest && 不存在outstanding的store && !num_unobserved[tid]
+                2. && lock_safe_time >= cur_cycle
+                    lock_safe_time = cur_cycle + setting_seriesold_base_lock_wakeup_penalty(1)
+            2. sta_unlock，相应的lock_table[entry].tlb_hit==1，才可以执行
+         2. exec阶段
+             1. 对于sta_unlock uop，如果lock table中的entry.tlb_hit == 0，触发REPLAY_CAUSE_STA_UNLOCK
+             2. setting_do_single_CPU1_fast_locks(1) &&  lock_load && !s.speculative_lock && (!oldest || 存在outstanding的store || num_unobserved[tid])
+                 1. setting_CPU1_prefetch_all_locks(1)（prefetch all cache line）
+                     通过mob访问相应的addr，如果replay == REPLAY_CAUSE_DTLB_MISS || DTLB_MISS_NO_PRB，返回相应replay
+                 2. 返回REPLAY_CAUSE_LOCK
+             3. setting_do_CPU1_prefetch_locks(1) (prefetch cache line) && lock_load && s.speculative_lock && (!oldest || 存在outstanding的store || num_unobserved[tid])
+                 1. 通过mob访问相应的addr，如果replay == REPLAY_CAUSE_DTLB_MISS || DTLB_MISS_NO_PRB，返回相应replay
+                 2. 返回REPLAY_CAUSE_LOCK
+             4. 对于lock_load，如果 (dtlb_hit || !replay) && oldest，设置相应的lock_table[entry].tlb_hit = 1
+      3. retire阶段
+            1. 存在outstanding的store || num_unobserved[tid]，不能retire
+            2. 否则，可以retire
+               1. 对于speculative_lock的访问，如果设置了!setting_do_CPU1_prefetch_locks(1)，则检查是否存在lock_bigflush
+               lock_bigflush
+                  1. speculative_lock_interrupt[tid] = 1
+                  2. data not in dl1 || fill buffer
+            3. 对于执行出现fault的lock_load
+                释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量speculative_lock_in_progress/speculative_lock_interrupt)
+            4. std.allocator_unblocking_store && !bogus
+                释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量)，表明当前lock指令执行完毕
+            5. 对于fault的lock_load，如果speculative_lock_in_progress[tid]，则设置speculative_lock_interrupt[tid] = 1
+            6. checkpoint模式，retire阶段，检查当前cur_cycle是否满足了setting_CPU1_checkpoint_penalty的延迟，不满足，则不能retire
+      4. beuflush | reset_rob阶段
+            1. 对于allocate阶段，如果设置了phythread.look_for_sta_unlock，则清除
+            2. setting_instant_reclaim_bogus_buffers(1)，释放相应的phythread的lock标记(包括mob.lock_scheduled, lock_table, 特定机制的lock变量)

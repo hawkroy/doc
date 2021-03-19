@@ -1,0 +1,145 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. retire的功能
+   1. 更新branch uop的retire指针，用于allocate阶段的因为branch uop backend stall的allocate stall
+   2. 进行retire phythread的初始选择
+       1. setting_retire_tsel_use_global_thread_priority(0)
+           使用core的global_thread_prio
+       2. !setting_retire_tsel_use_global_thread_priority(0)，使用retire自身内部保存的local_thread_prio
+       3. 根据初始的phythread，查看phythread是否retire ready，如果没有，则遍历后续的phythread
+       4. 返回retire ready的phythread
+   3. 在多个phythread间进行retire logic的arbiter处理
+       1. 对于选出的phythread进行retire ready的检查
+       2. 如果当前phythread不retire ready或是仅仅retire了bogus的uop，则设置setting_fast_bogus_retire(0)的情况下，查看下一个phythread是否retire ready && retire_count = 0
+   4. retire ready的检查
+      1. uop是retirable
+      2. cur_cycle >= retire_bubble_restart[tid]
+          当前rob head不能retire，且和当前oldest_alloc_time相同
+          retire_bubble_restart[tid] = cur_cycle + s_retire_restart_bubble(0)*setting_retire_clock(2)
+      3. phythread不处于wait_lock state
+      4. (setting_bogus_retire_ignore_latency(0) && is_bogus) || caused_thread_switch ||
+          ((cycle_scheduled + setting_replay_latency + setting_retire_latency + rs_to_stack_latency - 2 < cur_cycle)
+            && cycle_result_safe - setting_replay_latency + setting_retire_latency + rs_to_stack_latency <= cur_cycle)
+      5. 需要小于当前的retire_width
+          1. setting_restrict_retire_alloc_blocks(1)，只能retire alloc相同cycle内的uop(这里被称为相同line)
+          2. setting_mfp_sta(0) && head.ld_sta_mem_mispredict，如果没有head.penalty_taken，设置head.cycle_result_safe
+          3. 对于mdisamb，如果setting_ld_clear_penalty(0) && head.ld_clear，如果没有head.penalty_taken，设置head.cycle_result_safe
+          4. bogus指令总是可以retire
+          5. 对于setting_std_retire_at_commit(0)的情况，如果当前store还没有发送到store pipeline(senior store)，那么发送到store pipeline
+          6. 查看head后面是否还有新指令
+              1. 没有，那head可以retire
+              2. 存在，那么需要进一步判断
+          7. setting_do_CPU1_fast_locks(1)，对于lock_load
+              1. !setting_CPU1_checkpoint_penalty(0)
+                 1. 还没有store没有写出(store_head != store_tail) || num_unobserved[tid]， 不能retire
+                 2. !1的情况，可以retire
+                    对于标记为speculative_lock的uop && !setting_do_CPU1_prefetch_locks(1)，检查是否触发lock_bigflush
+              2. setting_CPU1_checkpoint_penalty(0)
+                 1. setting_CPU1_checkpoint_penalty == 1, 可以retire
+                 2. head.lock_safe_time < cur_cycle，不能retire
+                     lock_safe_time = cur_cycle + setting_CPU1_checkpoint_penalty - 1
+                 3. head.lock_safe_time >= cur_cycle，可以retire
+          8. 检查fusing的情况，设置了setting_alloc_retire_together(1)，则fusing的uop需要同时可以retire，才能retire
+                 以下条件满足1项，不能retire
+                 1. cycle_result_safe == -1
+                 2. cur_cycle < min_sched_to_ret_time(cycle_result_safe - uop_latency + retire_latency - dispatch_latency + sched_clock)，这一步使用cycle_result_safe看起来有些问题
+                 3. cur_cycle < cycle_result_safe - replay_latency + retire_latency
+          9. 对于branch指令，设置了setting_taken_branches_retire_in_slot_0(1)
+              1. 当前uop占用rob，且不是slot0的uop
+                 1. 对于branch uop && !bpu_mispredicted
+                    1. ujcc，可以在任意slot retire
+                    2. jcc，预测为taken的，只能在slot0 retire
+                    3. uncondition branch，只能在slot0 retire
+                 2. 对于fusing的uop，与1同样考虑
+         10. fxchg uop， 设置setting_fxch_retire_in_slot_0(1)，则只能在slot0进行retire
+         11. 其他情况都可以retire
+      6. 如果不小于
+          1. uop不占用单独的rob entry，可以retire
+          2. 对于setting_std_retire_at_commit(0)，如果当前store还没有发送到store pipeline，那么发送到store pipeline
+   5. 获得grant的phythread执行对应的retire步骤
+      1. 对于消耗rob entry的uop，更新uops_retired_this_clock，表明本cycle已经retire的uop个数
+      2. 对于setting_mrn_fullpenalty(1)的情况，当前head.mrn_mispred(表明mempred预测错误) && !is_bogus
+          1. reset_rob(刷新core的整个pipeline)——表明当前uop是bogus，取值从当前uop所在的lip重新取值执行
+          2. 根据golden的fwd信息更新mempred表
+      3. 对于!bogus的load，设置了setting_mdisamb_enable(1)，那么判断是否存在mdisamb的mispred情况
+          1. 存在mdisamb_flush的情况(load已完成，但是old store发现violation)，reset_rob，标记当前uop为bogus，且reset mdisamb table中的counter
+          2. 表明进行counter update，则inc相应的counter值
+          3. 表明需要reset，则reset相应的counter值
+      4. 对于!bogus的WRITEFSW的uop，如果old_fsw | (dst_data.flag & 0x7f) != old_fsw
+         设置setting_bigflush_on_fsw_change(1)的情况下
+         1. 如果当前uop是EOM uop，则直接进行big_flush(reset_rob)
+         2. 否则，设置pending_bigflush[tid]标志
+      5. 对于!bogus的WRITEMXCSR的uop，如果old_mxcsr | dst_data.flag != old_mxcsr
+         设置setting_bigflush_on_mxcsr_change(1)的情况下
+         1. 如果当前uop是EOM uop，则直接进行big_flush(reset_rob)
+         2. 否则，设置pending_bigflush[tid]标志
+      6. 对于setting_CPU1_take_lock_bigflush(1)，!bogus && head.lock_bigflush的uop
+         设置当前uop为bogus，且flush整个pipeline(reset_rob)
+      7. 对于!bogus && head.cause_thread_switch的情况
+         设置当前uop为bogus，且flush整个pipeline(reset_rob)，当前uop不会被flush，取值从当前uop重新取值，且target设置为当前uop的lip
+      7.a 对于pending_bigflush[tid]的情况，如果当前uop为bogus，则清除标志；否则reset_rob，清除标志
+      8. 对于bogus的uop，立即释放相关的资源(??这一步必须吗??在前面应该已经全部释放完毕了)
+      9. 更新branch_color[tid]，用于branch_period_checkpoint的处理
+     10. 对于!bogus的invalidate_page的uop，则clean tlb——包括dtlb, stlb, pdecache, itlb；对于pdecache，无论invalidate是否为一个page，都会全部flush
+     11. setting_enable_lock(0) && head.lock_load && !bogus
+          1. 如果当前phythread的head不是全局lock链表中的head，则设置当前phythread为wait_lock状态和相应uop
+          2. 否则，设置当前phythread正在lock处理状态中
+     12. 根据uop的opclass进行分类处理
+          a. portout || sta
+             1. 如果当前uop是bogus，那么标记相应的sab为bogus；如果是sab_tail，则直接reclaim对应的entry
+          b. load
+             1. 对于!bogus && xargv_mfp && xargv_mtf_mrn，根据pred的std更新对应的mempred的table
+             2. push进入q_reclaim_lb等待回收相应的lb entry
+          c. portin
+             1. push进入q_reclaim_lb等待回收相应的lb entry
+          d. std
+             1. 对于portout || std的uop，如果是bogus，则设置uop.cycle_store_completed = cur_cycle
+             2. 对于std，如果!bogus && xargv_mfp && xargv_mtf_mrn，更新mempred table的st部分
+      13. 更新rat阶段的partial reg mapping表，用于表示目前最新的data在arch reg中
+      14. fill buffer reservation release(??这部分应该在complete时就完成了??)
+      15. 进行period_checkpoint的reclaim
+      16. 对于load uop，进行hwp的stride的detect更新(??统计用??)
+      17. allocate_block_rob(0)，对于chunk分配rob的情况，如果retire的uop是同一个cycle内分配的(同时进或不进)，查看当前cycle_allocated与上一次是否是同一个cycle，push进入q_reclaim_rob_block[tid]等待reclaim
+      18. 更新fc1_write[tid] / fc320_write[tid]
+      19. allocate_restrict_num_fcw_writes(1) && dst==FCW0，较少当前的fcw_writer数量
+      20. 当前dst不是NULL_REG，push进入q_reclaim_uoptags[tid]等待reclaim
+      21. 对于消耗rob的uop，立刻更新real_num_rob[tid]，push进入q_reclaim_rob[tid]等待reclaim
+      22. 执行retire阶段的function model，判断是否存在fault
+           1. head是lock_load，对于任意的lock实现机制(setting_do_seriesold_base_locks || setting_do_CPU1_fast_locks)，都要release mob lock
+           2. 如果当前设置setting_do_CPU1_fast_locks(1)，且处于speculative_lock_in_progress[tid]，设置speculative_lock_interrupt[tid]
+           3. 对于sta && fault
+               1. 标记sab.silent=1(用于reclaim_sb)
+               2. 立即更新real_num_sb[tid]，push进入q_reclaim_sb[tid]等待reclaim
+               3. wakeup所有等待当前sta的cannot_forward的ld (这应该是模拟器的实现limitation)，fault需要刷新流水线，model中没有刷新的动作
+           4. 对于std && fault
+               1. wakeup所有等待当前sta的cannot_forward的ld (这应该是模拟器的实现limitation)，fault需要刷新流水线，model中没有刷新的动作
+       23. 对于!bogus的std(意味着sta一定不是bogus) || portout || bogus的sta
+           1. 如果当前phythread.num_locks && head.allocator_unblocking_store && !bogus，则release mob lock
+           2. 对于!fault的情况
+               1. !bogus, 发送到store pipeline进行drain
+               2. bogus && !setting_reclaim_sb_at_robclear(0)，发送到store pipeline进行drain
+           3. 对于!bogus && fault的情况
+               1. 如果当前phythread在lock状态，则设置为!lock状态，且清除lock_head
+               2. 标记sab.silent=1(用于reclaim_sb)
+               3. 立即更新real_num_sb[tid]，push进入q_reclaim_sb[tid]等待reclaim
+               4. wakeup所有等待当前sta的cannot_forward的ld (这应该是模拟器的实现limitation)，fault需要刷新流水线，model中没有刷新的动作
+       24. 对于branch uop，push进入q_bp_update[tid]等待进行bp table的更新
+       25. 对于设置了al_scoreboard[tid]的uop，解除al_scoreboard[tid]
+       26. 对于设置了fe_scoreboard[tid]的uop
+            1. 解除fe_scoreboard[tid]的设置
+            2. 设置fe_stall_reason = FE_STALL_REASON_SCOREBOARD
+            3. 设置fe_stall += setting_fe_ms_scoreboard_stall(6)
+            4. 如果当前cur_cycle为fe调度周期，则fe_stall -= 1
+       27. 对于std uop，设置stdid_to_robid[stdid]  = -1
+       28. 对于!setting_instant_reclaim_bogus_buffers(1) || !bogus，更新rob head，表明当前uop已经retire
+   6. 对于当前retire_count != 0的情况，更新local_thread_prio到下一个phythread
+   7. 对于相同alloc_cycled的uop，rob不空，但是没有成功retire的情况，更新retire_bubble_restart[tid] = cur_cycle + s_retire_restart_bubble(0) * setting_retire_clock(2)
+
+2. retire的pipeline时序
+   1. 从q_retire[tid] SIMQ经过4T后，uop可以进行retire
+      retire_cycle = cur_cycle - setting_retire_latency(4)
+      设置为retirable
+      对于setting_instant_reclaim_bogus_buffers(1) && is_bogus的uop，不进行retire处理
+   2. 后续retire stage完成都是功能性功能
+
+3. reset_rob(清除整个流水线的过程)

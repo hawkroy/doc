@@ -1,0 +1,118 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. uncore和上下游模块间的连接关系				next
+2. uncore的core接口时序和功能 (mti_core_scheduler)			done
+   工作频率为4T, uncore为core的半频
+   每次开始时，先从q_mti_fill_done的queue中进行mti entry的dealloc
+   1. core->uncore request channel
+    采用round-robin的服务机制，直到找到一个需要服务的core；下一次待服务的core会进行parking
+    每次grant后，需要等待setting_mti_alloc_clock(4)*2 = 8，才能再次arb
+        1. 依次轮询检查被服务core的q_mti_core_req中是否有ready的req
+            1. 存在
+                1. 对于还没有分配mti单元的req
+                    1. 检查是否有相同PA的mti entry并分配新单元，2种情况：1. PA相同； 2. PA相同，core相同；对于wc/uc store，treat为新分配
+                        1. 对于相同core的match req，如果match req可以进行promotable
+                            0. 移除match单元中在q_mem_transit中的req
+                            1. 当前req是store操作，设置g_core_go信号
+                            2. 对于不是UNC_REQ_PROMOTE的操作，直接返还credit
+                        2. 对于是UNC_REQ_PROMOTE的请求
+                            1. 移除当前req在q_mem_transit中的req
+                            2. 从当前q_mti_core_req中弹出req
+                        3. !(1&&2)
+                            1. 分配新的mti单元
+                            2. 如果分配的单元有相同地址的PA单元存在，进入sleep模式
+                2. 已经被ul3 grant的req直接从q_mti_core_req中弹出
+            2. 不存在
+                nothing
+    2. core->uncore misc channel
+     采用full-service的服务机制，每一个core都会服务
+     ix模型中实现的就是基本的snoop机制的cache coherent机制
+        1. 对于fill data采用fsq credit的机制，当返回UNC_REQ_FILL_COMPLETE消息后，返回credit
+        2. snoop response
+             更新snoop response；当所有的snoop response都收到后
+                 1. 进行snoop done的处理 （ul3 hit (load/store)，ul3 eviction)
+                 2. 对于store的req，设置q_bus_go信号，通知上层core对应的req已经go了
+    3. core->uncore wr data channel
+     采用full-service的服务机制，每一个core都会服务
+        1.   接收来自于core的evict data/wc store/uc store的data
+             1. 收到的消息为UNC_REQ_WRITE_DATA，后面还有DATA需要接收
+             2. 收到的消息为UNC_REQ_WRITE_DONE，对于wc store/evict，通过q_mti_uncore_rsp返回UNC_REQ_WRITE_DONE消息，说明已经写完成
+    4. uncore->core fill data channel
+     每个core都有单独的fill data channel，所以可以同时进行处理
+     对于每个core而言，如果当前T发送了fill data request到core，那么下一次要在setting_mti_alloc_clock进行处理(setting_uncore_chunk_ret(1))
+        1. 从mti中选择CORE_FILL的entry (select_mti_entry)
+        2. 当选择出的req第一次进行发送，需要获得fsq credit
+            1. 如果已经发送过，那么说明已经获得了credit，只需要持续发送即可
+        3. req开始进行发送后，不能再进行promotion的操作
+        4. 对于发送的最后一笔data之后，切换mti entry的状态
+             1. 对于需要进行L3 fill的req，切换到L3_FILL状态
+             2. 不需要进行L3 fill的req，则切换到DONE状态，并push q_mti_fill_done 等待进行release
+     5. uncore->core req channel
+      每个core都有单独的uncore request channel，所以可以同时进行处理
+      对于每个core而言，都可以进行一次snoop的操作——目前ix中仅仅支持package内部的snoop，package间的fsb的snoop不支持(生成snoop table的时候已经过滤了<generate_cross_core_snoops>)
+      对于每个core而言，当本次可以发送一个snoop request后，下一次可以发送的时间为setting_mti_alloc_clock(4)
+        1. 选择需要进行snoop的entry (select_mti_entry)
+        2. 获得fsq snoop的credit
+            1. 通过q_mti_uncore_req channel发送snoop request
+3. uncore本身的时序图，从core/l3/ext
+4. mti entry的状态机                                                  done
+5. mti的queue内的仲裁机制 (select_mti_entry)	done
+   queue内的仲裁不考虑core_fair和thread_fair，即每次仲裁的时候不考虑当前round-robin的coreid、threadid
+      1. 根据当前需要参与仲裁的mti entry的状态进行筛选，筛选出针对TYPE_DEMAND、TYPE_PREFETCH、TYPE_WRITE最高优先级的request (没有使能age，则按照enqueue排队，否则按照uop_num排序)
+      2. 在TYPE_DEMAND、TYPE_PREFETCH、TYPE_WRITE三个最高优先级的request进行二次仲裁，优先级为DEMAND = WRITE(按照enqueue进行比较) > PRFETCH
+6. ul3的pipeline流程(mti_l3_scheduler)		done
+   工作频率为4T, uncore为core的半频
+   两种request会进行l3 cache的仲裁：
+        1. cachable的request，初次访问ul3
+        2. cachable的request，ul3 miss，需要进行L3 fill
+   对于这两种不同的request，优先级为fill > l3_access；每个cycle只能有一个req进行grant，ul3在所有的thread和core之间进行round-robin
+   每次仲裁后，下一次的仲裁时间为
+        1. 对于fill, 为setting_l3_fill_rate = setting_mti_l3_sched_clock(4)*2
+        2. 对于l3 access，为setting_l3_read_rate = setting_mti_l3_sched_clock(4)*2
+   tag pipeline访问
+        1. 对于l3 access
+              1. ul3 hit
+                  1. 继续data pipeline访问
+                  2. 设置llc_wakeup_eraly信号，通知到core
+                  3. 对于evict操作，设置ul3为dirty
+                  4. 否则，查看是否需要进行snoop，如果需要，则准备进行snoop操作；否则，设置go信号，且对于store操作通知q_core_go信号
+              2. ul3 miss
+                  1. 更新mti entry准备访问FSB，EXT_PEND
+         2. 对于l3 fill
+              1. 更新ul3 cache entry
+              2. 设置mti entry为DONE, L3_NOFILL
+              3. 如果replace entry为dirty
+                    1. wakeup sleep entry
+                    2. start ul3 eviction(mti status不变)
+                          1. 需要snoop，则先进行snoop
+                          2. 否则，直接准备进行FSB操作
+              4. push q_mti_fill_done延迟mti entry的回收
+   data pipeline访问
+        1. 对于READ/WRITE来说，仅仅代表delay；对于READ来说，如果有snoop，则最新的数据由snoop提供，这里的data仅仅放入mti entry中
+7. uncore的fsb的仲裁策略(mti_ext_scheduler)		done
+   工作频率为setting_mti_extfill_clock = 2 * freq(3000MHz) / setting_fsb_frequency(400MHz) = 15
+   每次开始时，先从q_mti_fsb_go中进行对应mti entry的req的q_bus_go的处理
+   ext包括两个部分：uncore->fsb, fsb->uncore
+   对于uncore->fsb，每次仲裁的使能为 last_fsb_enqueue + setting_mti_extfill_clock*2，相当于fsb每隔1个cycle才可以仲裁一次
+   fsb对于package采用round-robin策略，下一个待服务的package进行parking，直到找到一个可以服务的package，下一次服务为当前服务的下一个package
+        1. 如果当前没有待处理的mti entry
+              1. 从当前正在处理的proc的uncore的mti中选择一个entry
+              2. 设置当前服务core为当前package
+        2. 如果有待处理的mti entry，比较服务core和当前处理的proc，如果不等，直接结束，进行下一个uncore的处理
+        3. 如果FSB不能处理当前的mti request，直接结束，等待下一次处理
+        4. 接收了
+            1. 设置mti entry为EXT_INPROG
+            2. 返回当前uncore已经处理了FSB
+            3. push q_mti_fsb_go，表明当前entry已经在go了
+    fsb->uncore
+    每个cycle只能处理1个request
+    1. 对于!setting_mti_fast_go，则在收到rsp后，对于store设置q_core_go信号，并设置mti entry为go
+    2. 对于!WRITE(uc store/evict/wc store)，mti entry进入core_fill状态，给core进行data fill
+         1. 对于cachable的req，则在core_fill后，需要进行l3 fill
+         2. 其他的情况，标志fill_from_ext=1
+    3. 对于WRITE
+         1. uc store，通过q_mti_uncore_rsp channel返回UNC_REQ_WRITE_DONE信号
+         2. 设置mti entry 为DONE
+         3. push q_mti_fill_done延迟mti entry的回收
+8. credit的管理
+9. FSB的事务处理，见fsb.txt，TBD

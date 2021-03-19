@@ -1,0 +1,222 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. ul2和上下游模块间的连接关系		done
+2. ul2本身的时序关系			done
+3. rqstq allocate逻辑   (fb_handle_l2_request (done)，ul2 rqstq的allocate逻辑)
+    ul2 rqstq的allocate逻辑
+       1. 从fillbuffer中选择优先级最高的request (fb_handle_request)
+       2. 尝试分配rqstq (分配时不进行addr的检查)
+       3. 分配成功，直接进入ul2 coreQ (如果ul2 CoreQ为空，使用bypass逻辑)
+       4. 分配不成功，next arb clock尝试
+4. ul2的pipeline arbitration逻辑
+    arbiter clock (2T)
+        高优先级： uncore_fifo(q_fsq)
+        低优先级： core_fifo[tid] (q_ul2_reqeust[tid])，使用thread policy(1=PHYTHREAD_INTERLEAVE), 1T 1个req，ul2.queue[tid]有space
+              0. 首先进行同地址和promotion的检查，如果promotion或者同地址，那么本T为空
+              1. 对于evict || store，放入q_fastul2[tid]
+              2. otherwise, 放入ul2.queue[tid]
+5. ul2的pipeline处理
+     1. tag pipeline处理
+         1. req来自coreQ
+             1. 进行来自两路不同request的优先级仲裁(优先级高的先处理)——实际不会遇到，在ul2 pipeline arbiter的地方1cycle只能有1个request
+             2. 按照request类型进行对应的处理，对于完成pipeline访问的req，标志compelte
+                 (l2_arbiter_handle_ul2_reqs)
+                   1. 进行l2 hwp的训练
+                   2. 对于dcu的访问，设置req.access_ul2
+                   3. 对于非(wcstore、ucstore)，访问ul2 cache hit
+                        1. 如果是stapref queue scheme, 设置当前stapref accept且complete
+                        2. 对于其他类型的reqeust，更新统计信息
+                        3. 对于normal load的uop，更新rob为ul2_pipeline_hit
+                        4. 对于evict的操作
+                             1. 设置对应的cacheline为Dirty
+                             2. rqstq dealloc
+                             3. 对于!wbdl1的情况，设置smb为SMB_Clean
+                             4. 对于wbdl1的情况，wb evict，释放dl1.evict buffer
+                        5. 除了evict的操作，push进入q_l2_data，进行cache hit的data访问
+                        6. 对于load，设置q_fb_bypass_ul2_wakeup_[rid/phytid]，尝试唤醒对应的entry
+                   4. ul2 miss
+                     1. 对于normal load的uop，更新rob为ul2_pipeline_miss
+                     2. 进行ul2 miss的处理
+                        (l2_arbiter_handle_ul2_miss)
+                        1. 对于stapref queue scheme
+                             1. 释放lmb
+                             2. 通知mob scheduler, DL1_MISS
+                             3. 完成
+                        2. 对于uc store/uc load(fetch)，wc write, req不在Q_BUS | Q_L2M buffer中的情况——这个路径不会走到(只会check Q_IL1(match rqstq)，且必须是FETCH）
+                            进入non-filter的路径 (l2_arbiter_handle_ul2_miss_non_filtered)
+                              1. 标记当前rqstq entry进入uncore访问
+                              2. 对于访问ul2的uop，标记rob.miss_ul2，对于swp而言，设置rob.dl1_miss_satisfied
+                              3. 对于!hwpref且不是wc|uc类型的req，创建ul2 hwp_detector
+                              4. 对于lmb中的req，设置lmb.is_on_bus
+                              5. 对于uop的访问或是fetch(不包括evict, store)，设置req.cycle_ul2_miss
+                        3. 否则，进入filter的路径 (l2_arbiter_handle_ul2_miss_filtered)——走不到
+                   5. 对于访问ul2的uop，设置ul2_pipeline_have_hit_miss_result，表明已经获得了ul2的hit/miss info
+              3. 对于标志complete的req，从pipeline上清除——肯定清除
+         2. req来自uncoreQ （l2_arbiter_handle_bus_transactions)
+             0.phythread mgr
+                  1. 对于req来自于uop， 尝试对应的phythread (phythread_completed_event)
+                       0. 如果phythread已经处于active或是READY状态，直接退出
+                       1. phythread.num_stall_event--
+                       2. 如果phythread.num_stall_event == 0
+                            1. 设置phythread.state = THREAD_READY
+                            2. 设置优先级为cur_time+active_stall, 并push进入q_phythread_ready的SIMQ
+                  2. 对于setting_phythread_switch_on_imiss(1)，且当前req是fetch，并且thread处于imiss_stall
+                       1. 设置phythread.imiss_stall = false
+                       2. 重复1中的动作(phythread_completed_event)
+             1.ifetch fill, not pmh request
+                  1. push into q_icu_fill(10T)
+             2. snoop
+                  1. snoop confirm msg
+                       send confirm_ack to snoopq entry
+                  2. snoop probe msg, send probe result to snoopq entry
+                        snoop will probe ul2/dl1/il1 simultaneously (l2 is inclusive cache)
+                       1. probe ul2
+                          1. hit,	SNOOP_HIT
+                               1. !dirty
+                                   1. SNOOPTOI req, invalidate
+                                   2. SNOOPTOS req, set cacheline to S
+                               2. dirty,     SNOOP_HITM, invalidate cache entry
+                           2. miss
+                               nothing, SNOOP_MISS
+                        2. probe dl1 (wb type)
+                           1. set dl1.hardaffect_cycle, will affect store commit
+                           2. probe dl1
+                               1. hit
+                                   1. !dirty
+                                       1. SNOOPTOI req, invalidate
+                                       2. SNOOPTOS req, set cacheline to S
+                                   2. dirty,	SNOOP_HITM
+                               2. miss
+                                   nothing, SNOOP_MISS
+                         3. probe icache
+                            1. hit,   invalidate, SNOOP_HIT
+                            2. miss, nothing, SNOOP_MISS
+             3. refill request( pref/fetch/load/store), arb from ul2 arbiter
+                (l2_arbiter_handle_fills)
+                  1. visit ul2 for fill data (l2_arbiter_access_ul2_for_fill)
+                      1. ul2 miss, nothing
+                      2. ul2 hit, double fill (?)
+                  2. write data & mesi to ul2 entry, found eviction entry
+                  3. pmh request, return data to pmh from q_ul2_to_pmh channel
+                  4. need eviction or not
+                        1. not, send fsq_fill_credit from q_mti_core_misc channel, release rqstq entry
+                        2. yes, rqstq request uncore to evict dirty data, blocking l2pipeline arbiter for 8T(4cycle)，过程中复用原有rqstq，如果由promotion没有发出，直接清除
+                  5. not pref
+                       1. notify lmb/smb l2_complete
+                       2. 将load的data返回给dl1
+                            1. 对于store
+                                1. 更新对应smb.data_arrived
+                                2. 如果当前smb.observed，设置对应smb状态为SMB_Dirty
+                                3. 对于wbdl1, 查看当前smb是否完成(data是否全部valid, l2complate, observed且SMB_Dirty)，设置smb.req_complete，更新需要replace的entry个数
+                            2. 无论store/load，将rqstq收到的data返回给dl1 (ul2-dl1接口为32B)
+                            (rqstq_chunk_schedule)
+                                1. 这里的发送一定是data已经全部收到了(64B)，计算当前需要占用q_fill_to_dcu channel多长时间(占用周期数*l2_arbiter_clock)，对于非uc的load/store，通知mob_schedule CHUNK_WAKEUP——这个路径不会走到
+                                2. 对于不需要发送的情况，检查对应的lmb/smb是否完成
+                                      1. 对于store，data是否全部valid，l2complete，observed且SMB_Dirty
+                                      2. 对于load，data是否全部valid，l2complete
+                                    完成，设置req_complete，更新需要replace的entry个数，对于非uc load，通知mob scheduler DL1_MISS wakeup
+                  6. stapref queue scheme, notify stapref entry done
+                  7. uc load, invalidate ul2's entry
+     2. hit的req的data pipeline处理
+         1. 对于fetch和load，更新thread[tid].miss_vaddr到INVALID_VADDR
+         2. 对于fetch, 非pmh req，通过q_icu_fill channel将data传送到icu
+         3. normal load/store/stapref
+                1. notify lmb/smb l2_complete
+                2. 将load的data返回给dl1
+                    1. 对于store
+                        1. 更新对应smb.data_arrived
+                        2. 如果当前smb.go=false
+                             1. 设置当前的smb为go
+                             2. 进行gob buffer的处理own (gob_handle_own)
+                    2. 无论store/load，将rqstq收到的data返回给dl1 (ul2-dl1接口为32B)
+                    (rqstq_chunk_schedule)
+                        1. 这里的发送一定是data已经全部收到了(64B)，计算当前需要占用q_fill_to_dcu channel多长时间(占用周期数*l2_arbiter_clock)[这里直接是占用周期数？]，对于非uc的load/store，通知mob_schedule CHUNK_WAKEUP——该路径会走到
+                3. 对于PMH req，通过q_ul2_to_pmh channel将data返回
+         4. rqstq dealloc
+6. rqstq的状态机结构， rqstq size(16), promotion机制		done
+7. rqstq的snapshot的scheduler的机制 			done
+8. ul2与uncore的credit的处理 
+     1. ul2->uncore credit，针对fill/snoop
+         not used
+     2. uncore->ul2 used
+         1. 目前的uncore中，每种不同类型的credit针对于每个core分布如下
+                UNC_REQ_READ			setting_max_mti_rd(16)
+                UNC_REQ_READ(prefetch)		setting_max_mti_prf(0)
+                UNC_REQ_WRITE			setting_max_mti_st(8)
+         2. 分配规则如下：
+                READ/PREFETCH使用同一个read credit queue
+                     当前in-fly的request没有超过rd_credit_per_core
+                WRITE使用store credit queue
+                     当前in-fly的request没有超过wr_credit_per_core
+9. snoopq的处理					done
+    1. snoopq的大小为setting_fsq_size(128)+1=129，不会是性能瓶颈
+10. 关于observed的处理
+  1. q_bus_signal
+      sideband信号， (early_bus_signal)，处理ul2中的rqstq
+      当uncore设置了对应的core的q_bus_go信号后，在l2 arbiter clock enable的时候
+      1. 如果rqstq.go没有设置
+         1. 设置对应rqstq.go 
+         2. 对于store来说，设置g_core_go信号，通知上层的gob已经go
+   2. q_core_signal
+       sideband信号，(early_bus_signal)，用于处理mob中的gob
+       1. (gob_handle_owned), 具体间lmb_smb.txt
+11. uncore接口的arbiter逻辑(fsb_arbiter)
+  1. 对于core->uncore的request channel
+     arbiter clock (2T)， 采用PHYTHREAD_INTERLEAVE方式
+         1. 到uncore的req_queue有空间
+         2. 有要发送的rqstq req
+         3. 使用rqstq的snapshot sched算法冲裁相应的req
+     处理流程
+         core->uncore的req类型
+                1. UNC_REQ_WRITE     (MTI_TYPE_WRITE)
+                2. UNC_REQ_READ      (MTI_TYPE_DEMAND/MTI_TYPE_PREFETCH)
+                3. UNC_REQ_PROMOTE
+         1. 对于需要进行promotion的req，直接获得credit(?)
+         2. 对于其他的request，需要从不同的request queue获得credit (MTI_DEMAND, MTI_WRITE, MTI_PREFETCH)
+         3. 对于获得了credit的req
+              1. 设置当前rqstq访问uncore
+              2. 清除credit_return标志(仅仅是个握手信号)
+              3. push进入q_mti_core_req
+              4. 对于write操作(evict/wc store/uc store)
+                   1. evict/wc store
+                        1.evict/wc store/uc_store
+                             1. smb_evict(wc type)/uc_store, smb_dealloc
+                             2. normal evict (!wt dl1), smb_dealloc
+                             3. normal evict (replace evict), dealloc dl1.evict_buffer
+                        2. rqstq dealloc
+                        3. 对于ul2 evict，发送fsq_fill_credit到uncore，通过q_mti_core_misc通道，credit一定存在
+                            (fsq_fill_credit)
+               5. 对于PMH或是fetch类型的req，进入q_mem_transit等待
+   2. 对于core->uncore core_misc channel
+       无需credit管理，用于发送snoop rsp/data，以及core的fill credit
+   3. 对于core->uncore wr_data channel
+       这条通道没有使用，如果分离write req/data，这个会使用。只针对evict/ucstore/wcstore；否则全部走core->uncore req channel
+       当rqstq中的req grant访问uncore的时候，设置当前wr data channel由当前rqstq entry占用，占用周期为setting_fsb_arbiter_clock(2) * (setting_ul2_linesize(64)/uncore_wr_width(16))，当写入过程中，标志UNC_REQ_WRITE_DATA，完成时UNC_REQ_WRITE_DONE
+   4. 对于uncore->core fill_data channel
+       接收来自于uncore的fill data/rsp， 对应UNC_REQ_FILL
+       1. rqstq进行fill的处理，并标志当前refill是否结束，针对UNC_REQ_FILL
+            1. go信号处理
+                1. rqstq是store操作(wb/uc)，且目前还没有go
+                      1. 设置当前rqstq为go
+                      2. 通过q_core_go信号通知mob当前request已经go了
+                2. 不是store操作，且目前没有go
+                      1.设置当前rqstq为go
+            2. 接收发送来的data，并更新内部的chunk_received
+            3. 设置状态为rqstq.MTI_STATE_FILL_PEND
+            4. 如果当前rqstq是可以promotion的，但还没有发送REQ_PROMOTE，那么不发送，且从snapshot sched清除
+            5. 如果已经接收到了完整的request data，则请求访问ul2的uncoreQ，进行refill处理
+       2. 如果当前entry refill结束，且当前request是PMH或是FETCH，则从q_mem_transit中移除
+   5. 对于uncore->core req channel
+       接收uncore的snoop信息，分配snoopq
+   6. 对于uncore->core rsp channel
+       接收来自于uncore的若干sideband消息
+          1. UNC_REQ_EARLY_WAKEUP，来自于l3 hit的fb_bypass_wakeup
+              唤醒mob scheduler中的req
+          2. UNC_REQ_KILL_PREFETCHER——false path
+               1. lmb deallocate
+               2. 通知mob scheduler DL1_MISS
+               3. rqstq dealloc
+          3. UNC_REQ_WRITE_DONE，针对于使用独立wr data通道的uc store/wc store/evict，或是ucstore
+               1. smb dealloc
+               2. rqstq dealloc
+               3. 对于L2 evict，发送fsq_fill_credit到uncore，通过q_mti_core_misc通道，credit一定存在

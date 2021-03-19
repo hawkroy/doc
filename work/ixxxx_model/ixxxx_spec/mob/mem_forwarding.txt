@@ -1,0 +1,40 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. mem forwarding的预测器结构
+2. memory forwarding的预测结果说明
+    1. 对于load
+       1. ld_mrnable，表示load是否进行了memory renaming
+           不基于x86进行预测xargv_mrn_bom(0)
+           预测原则：
+               1. !lock_load
+               2. collide_with_std && confidence > 2
+       2. ld_lowconf
+          1. collide_with_std
+          2. 0 < confidence < 2
+       3. mrn_dist
+           预测的load与std间的距离，通过这个可以计算出std在storeq中的位置
+       4. ld_mem_viol
+           表明load预测的forwarding不正确
+           1. fwding的std与实际forwarding的不同
+           2. 
+               1. violation[(bimodal_index >> curcp->mfp_bimod.sets_log) & curcp->mfp_bimod.alias_mask]
+       5. ld_collide_with_std
+           ld与std之间存在依赖关系，且可以进行foward
+           只有符合如果两种情况时，才会进行load/std间的forwarding预测(meet_mrn_cond ->oracle_meet_mrn_cond)
+           1. setting_mrn_sfb_rules && fast_forward(pa相同，且load.size<=std.size)
+           2. !setting_mrn_sfb_rules && std完全覆盖load 
+       6. pred_sta_indep
+           预测load与sta之间是否是independent的
+           如果load与某个std间存在forwarding(oracle_fwd_rid!=-1)，则不会是sta_indep
+               1. !collide_with_std
+               2. confidence > 2
+               3. !violation[(bimodal_index >> curcp->mfp_bimod.sets_log) & curcp->mfp_bimod.alias_mask]
+   2. 对于std
+       1. predicted_to_fwd
+           表明std会与load之间存在forwarding关系(在retire阶段处理)
+3. mem forwarding在不同pipeline stage上的处理
+   1. mem forwarding在fetch阶段的处理
+   2. mem forwarding在alloc阶段的处理
+   3. mem forwarding在scheduler阶段的处理
+   4. mem forwarding在exec阶段的处理，和replay间的关系
+4. mdisamb table的处理

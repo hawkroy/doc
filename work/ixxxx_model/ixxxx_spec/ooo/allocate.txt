@@ -1,0 +1,14 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. allocate的pipeline时序
+2. allocate的功能
+    1. memory forwarding predictor
+    2. register renaming
+    3. memory renaming
+    4. partial register(include eflags)的处理
+    5. rob read port的处理
+    6. allocate resource (rob/sb/lb)的处理  (针对ld/st的特殊处理)
+    7. uoptags
+    8. lock predictor
+    9. branch restore机制(checkpoint，wait_retire等)
+    10. port binding和rs allocation

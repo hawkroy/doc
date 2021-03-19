@@ -1,0 +1,85 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+load mob pipeline flow:
+  0. tlb visit
+    1. tlb hit, nothing
+    2. tlb miss, TLB_MISS replay
+      1. get pmh
+        1. success, nothing
+        2. fail
+          1. request at retire stage, ATRET replay
+          2. MISS_NO_PRB replay
+  1. setting_do_CPU1_fast_locks(1), lock_load, dtlb hit, oldest load
+    1. update lock_table.tlb_hit = 1
+  2. setting_mrn_no_mem_access(1) && load mem rename (mem_renamed)
+    1. check for storeq for address disambiguation and forwarding check
+      1. done, return replay
+  3. check on rb_replace same cycle dl1_replace_cycle (why cur_time % 16 check?)
+    1. conflict
+      1. done, return DL1_BANK_CONFLICT
+      2. no conflict, so update dl1_read_cycle[cur_time % 16] = 1
+  4. no swp uop, visit dl1 cache bank check， setting_dl1_bank_conflicts_stores(0) || setting_dl1_bank_conflicts_loads(1)
+     current dl1 cache use setting_dl1_bank_count(8) bank, each bank will handle 1B, so address shift setting_dl1_bank_start_bit(3), if split, only cacheline boundary
+     calc spanned banks
+    1. setting_dl1_bank_cnfl_always_two_or_four_banks(0), start_bank == end_bank || end_bank = start_bank+2 (mean visit 1 bank or 3 banks), if end_bank is odd, start_bank-1, otherwise, end_bank+1
+    2. only for load bank conflict setting_dl1_bank_conflicts_loads(1)
+      1. any bank already has read in same cycle [start, end], then conflict
+      2. setting_dl1_bank_cnfl_excl_same_line_ld(1), if conflict, but hit same line (use pa)
+    3. condition:
+        a. 存在bank conflict
+        b. ！对于setting_dl1_bank_cnfl_excl_same_addr_ld(0){访问相同地址不block}, 且load的访问与当前dl1上bank的访问PA/SIZE都相同
+        c. ！setting_dl1_bank_cnfl_excl_same_line_ld(1){访问相同cache line不block}，存在相同cache line的访问
+        d. ！setting_dl1_notld_bbc_same_set(0){访问相同cache set不block}，且load访问的cache set与bank访问的cache set相同
+      1. DL1_BANK_CONFLICT replay
+      2. 设置bank.num_reads, 并更新bank.pa_address, bank.read_size，这个在每次exec调用时会更新，属于pipeline信号
+  5. 进行load和sta之间的collision处理，主要是地址的比较，包括unknown sta check以及在mfp disable情况下的memory forwarding
+     如果存在replay，则直接replay [STA_GUARD_WINDOW, CANNOT_FORWARD, ST_FORWARD_INCOMPLETE_ST]
+  6. 不存在collision，mfp enable，且预测STD forwarding(STD_DEP)，且当前STD_DEP没有完成(store 没有完成，没写入到store buffer中)
+    1. STD_DEP的结果没有safe或是还不满足执行的safe时间   < cycle_result_safe - (sched_ld_past_std(1)? uop_latency: 0)
+       ST_FORWARD_INCOMPLETE_ST
+       标记当前一起replay的std robid
+    2. push hwp_reorder_queue， hwp_l2， HWP_MISS_LEVEL_HIT_DL1
+  load dl1 cache start, no replay......
+  7. visit dl1 cache & fb(lmb&&smb)
+    0. !miss_dl1
+       hwp_l1进行detector training, hwp_train_detectors
+    1. dl1 cache & fb found hit or not, all miss
+      1. cam_smbs conflict check, if hit, then done
+           1. setting_smb_l1_reconnect(0) != 1 || smb_entry == -1
+                then done, CACHE_DL1_MISS
+      2. miss, then
+        2.1 !miss_dl1, detector_num==-1{mean no detector in hwp_l1}, not detector hwp_train in hwp_l1
+            check on different queue(UL2, L2M, BUS, HWP){condition: !oldest, priority=0, UL2_TYPE}, no match, then create hwp_l1 entry
+        2.2 ! swp，访问ul2
+            ul2 hit, DL1_MISS
+            ul2 miss, DL2_MISS
+        设置miss_ul2_primary_or_secondary = 1 (DL2_MISS)
+        2.3 setting_scheduled_ul2_fsb_q(0), dl1_miss_satisfied |= PREFETCH_OP(uop)
+        2.4 setting_lmb_enable(1) && setting_lcu_lmb_filtering(1)（检查lmb是否包含有相同的request)
+          1. 存在lmb entry, 设置为DL1_MISS，sta replay， push mob_sleep，等待replay
+          2. 不存在，继续
+        2.5 !2.4, check on different queue(L2M, BUS) {condition: priority(uop_num | swp), is_oldest, UL2_TYPE}
+        2.6 setting_lmb_enable(1), allocate load miss buffer, check
+          1. fail
+              1. full, DL1_MISS_NO_FB
+              2. others, DL1_MISS
+          2. succ
+              load done
+              1. setting_hold_reqs_at_l2arb(1) {hold in ul2 arbitrator}, enqueue q_unordered_ul2
+              2. !setting_hold_reqs_at_l2arb, send to ul2 directly 
+        2.7 !setting_lmb_enable || swp, send to ul2 directly
+     3. dl1 cache hit or fb hit
+        1. push hwp_reorder_queue of hwp_l2, with HWP_MISS_LEVEL_HIT_DL1
+        2. fb hit, not dl1 hit
+            update num_reads_lmb counter, set read_addr_lmb to current PA
+        3. dl1 hit, no fb hit
+        4. update thread.miss_vaddr to invalid if match
+        5. train on every l1_access && setting_sta_pref_spawn_dram_pref(1)
+            1. !fb hit, write dl1??, why
+            2. train hwp_l2
+        6. uncachable && !fb hit, invalid cache, dl1, dl2
+   8. memory renaming, RET_DEP, !RET_DEP.cycle_store_complete{store还没有完成}
+        标记依赖的RET_DEP
+        replay, CANNOT_FORWARD
+   9. !swp, !replay, 进行SAB的disambiguation
+   10. mdisamb_done = true {仅在本次load complete进行更新——storeq forwarding，ul2{ul3}fb_bypass complete, dl1||fb hit, push in lmb}

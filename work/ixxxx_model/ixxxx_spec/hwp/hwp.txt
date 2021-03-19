@@ -1,0 +1,253 @@
+/* vim: set fileencodings=utf-8,gbk,gb2312,cp936 termencoding=utf-8: */
+
+1. stream prefetch的处理 (il1 prefether)
+2. hwp的类型
+   HwpPref {
+      HwpVaddrPref   		*engine
+      uint64 		next_time
+      int 			rep_reate
+      int			requests_check_cache				// hwp request first check cache, hwp_l1_requests_check_cache(0)
+      int          		request_head_ptr
+      int          		request_tail_ptr
+      HwpRequest  		*request						// output buffer, xargv_hwp_outputq_entries(512)
+      int 			num_reorder_queue_entries				// HWP_REORDER_QUEUE_ENTRIES(4096)
+      uint32                		log2_region_size
+      HwpReorderQEntry    	reorder_queue[HWP_REORDER_QUEUE_ENTRIES]
+      uint32                 	reorder_queue_ptr
+      int                    		reorder_queue_last_mem_uop_num
+      HwpFilterQueueEntry 	filter_queue[MAX_THREADS][HWP_FILTER_QUEUE_SIZE]
+      uint32                 	filter_queue_ptr[MAX_THREADS]
+      PrefetchListEntry    	prefetch_list[PREFETCH_LIST_SIZE]
+
+      CorrelationHistoTableEntry **correlation_histo_table
+      CorrelationTableEntry     	**correlation_table
+      int 			pre_request
+
+      HwpCorrelationEntry 	*correlation_array
+      vector<Virt_Address> 	correlation_input_filter
+      DiffWindow 		*correlation_diff_window
+      Virt_Address 		*previous_vline
+      int 			correlation_array_tail_ptr
+      vector<Virt_Address> 	dpl_prefetch_filter_queue
+      SignedVaddr 		predicted_next_diff
+   }
+   1. HWP_L2_TO_L1， l1 hwp, KIND_SPATIAL
+   2. HWP_MEM_TO_L2, l2 hwp, KIND_SPATIAL
+
+   HwpVaddrPref {
+      void *parent				// hwp object
+
+      int          num_detectors			// detector entry number
+
+      int          detector_window
+      int          detector_window_var
+      int          stride
+      int          max_stride
+      int          change_stride_1_only
+      int          kickstart
+      int          num_pref_on_trig
+      int          num_pref_on_create
+      int          num_pref_close_behind
+      int          num_pref_close_ahead
+      int          num_pref_far_behind
+      int          num_pref_far_ahead
+      bool       var_distance
+      int          min_distance
+      int          max_distance
+      uint32    triggers_for_min_stride
+      uint32    trigger_hist
+      uint32    size_with_stride
+      int          input_filter_entries
+      int          *input_filter_replace_entry
+      Virt_Address **input_filter_entry
+      int          output_filter_entries
+      int          *output_filter_replace_entry
+      Virt_Address **output_filter_entry
+
+      hwp_t     type
+      HwpVaddrDetector **detector
+      hwp_kind_t     kind
+
+      bool       page_match_needed
+
+      int (*callback_get_num_fsbq_entries)(int tid)			// for rqstq, get_ext_pend entries
+      bool (*callback_create_vaddr_request)(HwpVaddrPref *hwp,
+                                          HwpReq *req,
+                                          Virt_Address vline,
+                                          int detector_id,
+                                          int triggered_by)
+   }
+
+2. hwp的API
+   0. create entry API
+       hwp_create_detector(HwpPref *hwp, mem_trans *m)
+       调用点：
+           1. req第一次访问dl1 miss，且hwp_l1中没有相应的detector，在hwp_l1中创建
+           2. req访问ul2 miss，且当前req不属于被filter的范围，在hwp_l2中创建
+               filter范围
+                   1. hwpref || hwp_ifetch
+                   2. setting_hwp_no_train_sta_prefetch(0) && stapref
+                   3. setting_hwp_no_train_swp(0) && swp
+                   4. setting_hwp_no_train_rfo(0) && req_type == STORE
+                   5. setting_hwp_no_train_code(0) && req_type == FETCH
+                   6. mtype == UC | WC
+   1. train API
+       hwp_train_detectors(HwpPref *hwp, mem_trans *m, int *detector_num)
+       调用点：
+           1. ld || sta(setting_sta_pref_spawn_l2tol1_pref(1)) 首次或是!dl1_miss 访问dl1，访问hwp_l1
+           2. hwp_train_on_every_l1_access(0) && (ld || sta(setting_sta_pref_spawn_dram_pref(1))), dl1 hit，访问hwp_l2
+           3. 每次访问ul2, !hwp_implement_GNRL(0)
+           4. 访问ul2，且为hit，hwp_implement_GNRL(0)
+           5. rqstq prefetch请求在ul2 arb时被promotion
+   2. push reorder_queue API
+       hwp_reorder_queue_enqueue(HwpPref *hwp, mem_trans *m, ROB *r, hwp_miss_level_t miss_level)
+       调用点：
+           目前没有实现(!hwp_implement_reorder_queue(0))，暂时pending
+   3. inject request API
+       hwp_inject_request(HwpPref *hwp, CacheData *cache)
+       调用点：
+           1. 每个cur_cycle调用，hwp_l1/hwp_l2
+
+3. hwp train detector的流程
+   1. 填充hwp fill packet(最重要的是vline的概念)
+   2. 对于MEMTOL2， train correlation engine
+   3. train detector
+       1. 根据模型配置，更新hwp_distance
+          对于(hwp_implement_GNRL(0) || xargv_hwp_fast_throttle(1)) && rqstq_ext_pend >= xargv_hwp_fast_throttle_max_bsq(16), hwp_distance=2
+       2. !num_detectors(没有实例化dectectors), 忽略
+       3. 查看input filter buffer，如果hit，忽略
+       4. 对于hwp_implement_GNRL(0)的情况
+          1. TBD
+       5. 遍历所有的detector entry
+          1. page_match / in_range / in_trigger_window / lower_end_of_range
+          2. hwp_implement_GNRL(0)
+              根据hwp_window，更新in_range / in_trigger_window / lower_end_of_range
+          3. 如果!dir || !page_match || !in_range || !in_trigger_window，忽略
+          4. 确定detector_window，对于var_distance，选择hwp_distance，否则是detector_window
+          5. 查看当前req.vline是否在当前detector的区间内[vline, vline-dir*detector_window*stride]
+              1. 如果不覆盖，继续
+              2. 如果覆盖， 结束
+                  1. 更新lru_time
+                  2. 更新stride (HWP_set_stride)
+                     1. 根据当前detector的trigger_history的信息，进行min_stride的更新
+                        如果当前stride > min_stride，则设置为min_stride
+                     2. 如果trigger_history没有相应的req信息，则更新到trigger_history
+                     3. (stride==1 || !change_stride_1_only) && d.num_triggers > triggers_for_min_stride
+                         更新stride = min_stride, min_stride = max_stride, num_triggers = 0
+                  3. trigger hwp req (HWP_trigger_prefetch)
+                  4. 对于hwp_implement_GNRL(0)
+                     wrap当前detector的hwp prefetch req
+                  5. !hwp_implement_GNRL(0)
+                     删除detector中的redundent的entry (type一致/需要访问的vline被当前detector hit)
+                  6. 更新input filter buffer
+                  7. 对于var_distance，更新detector_window_var
+       6. 没有找到可覆盖的detector，尝试遍历detector，设置dir用于覆盖当前的request
+          1. page_match / in_range / in_trigger_window / lower_end_of_range
+          2. hwp_implement_GNRL(0)
+              根据hwp_window，更新in_range / in_trigger_window / lower_end_of_range
+          3. 如果!dir || !page_match || !in_range || !in_trigger_window，忽略
+          4. xargv_hwp_dont_set_direction_on_l1_prf(0) && l1_prf，忽略
+          5. 对于如下2种情况，忽略
+             1. 对于MEMTOL2的detector.created_by_swp && req.swp
+              &&
+             2. !hwp_set_dir_with_younger_uop(1) || req->numseq < d->created_by_uop_num
+          6. 设置detector的stride为1
+          7. 根据两个dir根据detector_window探测detector是否包含当前的req.vline
+             0. 对于不覆盖的情况，忽略
+             1. 对于覆盖的情况
+                1. 对于hwp_implement_GNRL(0) || hwp_vaddr_implement_direction_thresholds(0)的情况，判断当前是否要设置dir (HWP_GNRL_is_there_no_direction_set)
+                    不满足threshold的要求，更新input filter buffer，退出
+                2. 更新detector的dir，并设置prefetch vline为req.vline+dir
+                3. trigger hwp req (HWP_trigger_prefetch)
+                4. 对于hwp_implement_GNRL(0)
+                   wrap当前detector的hwp prefetch req
+                5. !hwp_implement_GNRL(0)
+                   删除detector中的redundent的entry (type一致/需要访问的vline被当前detector hit)
+                6. 更新input filter buffer
+       7. 如果依然没有找到，对于hwp_next_line_prefetch(0) && l2_miss && （!hwp_treat_l1_prefetch_like_sw_prefetch(0) || !l1_hwp) && no_pref_issued && rqstq_ext_pend < xargv_hwp_spatial_num_bsq(6)，全部使用detector entry #0
+           1. xargv_hwp_vaddr_emulate_sectoring(0)
+               1. 对于even vline, 查看是否在spartial_filter中过滤vline+1，否则generate hwp req
+               2. 对于odd vline，查看是否在sprtial_filter中过滤vline-1，否则generate hwp req
+           2. !xargv_hwp_vaddr_emulate_sectoring(0)
+               1. 查看是否过滤vline+1，否则generate hwp req
+               2. hwp_prev_line_prefetch(0) && 过滤vline-1，否则generate hwp req
+
+4. hwp create detector的流程
+   1. 填充hwp fill packet(最重要的是vline的概念)
+   2. 对于MEMTOL2的hwp，train correlation engine
+   3. 创建detector
+       1. 如果当前的vline已经在engine的input_filter_buffer中，那么不创建detector，说明已经prefetch过了
+       2. 对于hwp_implement_GNRL(0)的情况
+          1. TBD
+       3. 对于!hwp_implement_GNRL(0)的情况，扫描所有的detector，查找是否存在match的entry
+          match的前提是vline和detector的page是相同page
+          关于far_stride/close_stride的确定
+             1. far_stride = max(max_detector_size, (2*detector_window+num_pref_on_trig)*stride)
+             2. far_stride2/close_stride = max(max_detector_size, (1*detector_window+num_pref_on_trig)*stride)
+             detector_window = var_distance ? detector_window_var : detector_window
+
+          1. NEARBY_FINDER_CLOSE_AHEAD_MISS
+             1. dir<0, req.vline in [vline, vline+close_stride], detector backward, req hit in fwd
+             2. dir>0, req.vline in [vline-close_stride, vline], detector forward, req hit in bwd
+             ??very very strange, no any hwp request generated??
+             generate hwp request (dl1 | ul2 && ??num_pref_close_behind??)
+                1. dir<0, vline -= stride to req.vline
+                2. dir>0, vline += stride to req.vline
+          2. NEARBY_FINDER_FAR_AHEAD_MISS
+             1. dir<0, req.vline in [vline, vline+far_stride], detector backward, req hit in fwd
+             2. dir>0, req.vline in [vline-far_stride, vline], detector forward, req hit in bwd
+             再次遍历detector数组
+                 1. 对于dir与match的entry dir相反的entry d
+                     1. d.dir<0, req.vline in (d.vline, d.vline+far_stride2] ??这里也应该是[]??   , detector backward, req hit in fwd
+                     2. d.dir>0, req.vline in [d.vline-far_stride2, d.vline], detector forward, req hit in bwd
+                     找到新的match entry
+             对于新找到的match entry，产生req.vline-stride for [1, num_pref_far_head]和req.vline+stride for [1, num_pref_far_head]
+             对于没有找到新的match entry，根据lru算法找到替换的detector，设置相反的dir/vline=req.vline，并更新
+                  1. vline += dir*stride for [1, num_pref_far_ahead]
+             更新input_filter buffer，按照fifo的顺序
+          3. NEARBY_FINDER_CLOSE_BEHIND_MISS
+             1. dir<0, req.vline in [vline-close_stride, vline], detector backward, req hit bwd
+             2. dir>0, req.vline in [vline, vline+close_stride], detector forward, req hit fwd
+             ??very very strange, no any hwp request generated??
+             vline = req.vline + dir*(num_pref_close_behind+1)
+             generate hwp request (dl1 | ul2 && num_pref_close_behind)
+                1. dir<0, vline -= stride, to req.vline
+                2. dir>0, vline += stride, to req.vline
+             add to input filter buffer, fifo replace
+          4. NEARBY_FINDER_FAR_BEHIND_MISS
+             1. dir<0, req.vline in [vline-far_stride, vline], detector backward, req hit bwd
+             2. dir>0, req.vline in [vline, vline+far_stride], detector forward, req hit fwd
+             generate hwp request
+                1. dir<0, req.vline-stride for [1, num_pref_far_behind]
+                2. dir>0, req.vline+stride for [1, num_pref_far_behind]
+          5. NEARBY_FINDER_NULL (hwp_implement_GNRL(0)，一定是这种情况)
+             nothing match
+             1. 替换lru选出的entry
+             2. 对于hwp_implement_GNRL(0)的情况
+                1. TBD
+             3. generate hwp request req.vline - stride for [1, num_pref_on_create]和req.vline + stride for [1, num_pref_on_create]
+             4. 更新input filter buffer
+       4. 对于hwp_next_line_prefetch(0) && l2_miss && （!hwp_treat_l1_prefetch_like_sw_prefetch(0) || !l1_hwp) && no_pref_issued && rqstq_ext_pend < xargv_hwp_spatial_num_bsq(6)，全部使用detector entry #0
+           1. xargv_hwp_vaddr_emulate_sectoring(0)
+               1. 对于even vline, 查看是否在spartial_filter中过滤vline+1，否则generate hwp req
+               2. 对于odd vline，查看是否在sprtial_filter中过滤vline-1，否则generate hwp req
+           2. !xargv_hwp_vaddr_emulate_sectoring(0)
+               1. 查看是否过滤vline+1，否则generate hwp req
+               2. hwp_prev_line_prefetch(0) && 过滤vline-1，否则generate hwp req
+
+5. vaddr_hwp产生hwp req的过程
+   1. 查看hwp_prefetch queue，过滤掉已经产生的hwp req，setting_hwp_prefetch_filter_queue_size(256)，fifo更新
+   2. hwp_implement_GNRL(0) && 和detector_entry不是同一page的req，忽略
+   3. 设置当前detetctor已经prefetch了几条line (每条line分配一个visit_num值，单调递增, line_prefetched)
+   4. 如果当前output request已满，忽略
+   5. 如果当前output request中已经存在相同vline的request(addr_type/tid/line_vaddr均相同)，忽略
+   6. 查看output filter buffer是否有相同的request，有忽略，没有进行替换，fifo策略
+   7. 对于requests_check_cache && L2TOL1的hwp，查看dl1是否hit，并查看Q_UL2/QL2M/Q_BUS(目前配置不成立)
+   8. 在output request中创建相应的hwp request，并更新head_ptr
+
+6. hwp inject stream的流程
+   每个cur_cycle都会调用，目前实现的两个hwp，都会尝试访问ul2 (L2TOL1, MEMTOL2)
+   1. 满足ul2 arbiter的时间，且满足hwp的下次调度的时刻
+   2. 在request output buffer中查找还没有issue的prefetch请求 [tail_ptr, head_ptr]，并更新tail_ptr，tail表示当前待发送的请求，head表示刚刚进入request output buffer的请求
+   3. 如果当前tail_ptr存在没有发送的请求，构造memory请求，并送入ul2 arbiter进行aribter
+   4. 如果请求被ul2 arbiter接收，那么更新下一次的调度时刻(cur_cycle + rep_rate(4))
