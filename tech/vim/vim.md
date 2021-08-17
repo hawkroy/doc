@@ -26,6 +26,8 @@
 
 - autocommand
 
+  当vim发生一些事件(event)后，自动执行的函数或是命令
+
   `:autocmd {event-name} {pattern} {command}`
 
   augroup {NAME}
@@ -35,7 +37,7 @@
   ​	autocmd!
 
   ​	autocmd .....
-
+  
   augroup END
   
 - normal [!]
@@ -45,6 +47,29 @@
 - function [!]
 
   定义脚本函数，当存在`!`时，如果存在同名的函数则同名函数会被替换，否则则触发错误报告
+  
+- command [!]
+
+  定义vim的命令，类似于`echo/q/w`等，命令的格式为`comamnd [!] {attr} Name {cmd} {repr}
+
+  - {attr}定义了命令的各种属性，这里定义的attr会在{repr}的替换文本中，使用`<attr>`进行替换
+
+    具体参看vim的帮助文档`:help command`
+
+  - {cmd}定义命令背后具体的执行行为，通常为脚本函数。需要注意的是：vim的命令参数传递的参数文本自身，而不是参数的值，所以其求值在命令定义所在的上下文进行
+
+    比如：
+
+    ```vim
+    " vim1 script
+    let s:msg = "None"
+    com! -nargs=1 Error echoerr <args>
+    
+    " vim2 script
+    source vim1.vim
+    let s:msg = "Hello"
+    :Error s:msg	"will output None
+    ```
 
 ## Vim脚本编写
 
@@ -102,7 +127,48 @@ pathogen会将`.vim/vundle/*`目录下的所有插件全部加入到vim的`RUNTI
 
 在pathogen的基础上，添加了从远程github等托管平台或是vim-scripts.org上自动下载插件并配置的能力，并将所有管理的插件放入到bundle目录中。exvim使用vundle进行插件管理。其基本用法如下：
 
+```bash
+# 下载Vundle的vim插件
+git clone https://github.com/VundleVim/Vundle.vim.git ~/.vim/bundle/Vundle.vim		#将Vundle的插件放入到~/.vim/bundle的目录
+# 修改.vimrc文件，在开始添加如下代码
+cat >> .vimrc << EOF
+set nocp    " not compitable with vim mode
+filetype off  " required by Vundle plugin
+set rtp+=~/.vim/bundle/Vundle.vim	" add vim runtime path with Vundle plugin
+call vundle#begin('path_somewhere')
+" or call vundle#rc('path_somewhere')  deprecred API, but works, no require vundle#end() call
 
+Plugin 'VundleVim/Vundle.vim'	" let vundle manager vundle, required
+
+" below are plugin's need add
+Plugin ...
+" default:
+"	1. vim script will download from github, only need set scripts path without github prefix
+"	2. if not github script, need use git://git.wincent.com/command-t.git to full specify
+"	3. local script, use 'file:///home/gmarik/path/to/plugin' to specify
+"	4. can change name to avoid conflict, as Plugin 'ascenator/L9', {'name': 'newL9'}
+"	5. if need specify script search path, as Plugin 'rstacruz/sparkup', {'rtp': 'vim/'}
+
+call vundle#end()	" need, to let vundle know all plugin list done, not required if call vundle#rc
+
+filetype plugin indent on 	" required
+
+" put not plugin config here
+EOF
+```
+
+如下是当前Vundle支持的命令：
+
+- PlugList： 列出所有已经配置的插件
+- PlugInstall： 安装插件，使用`PlugInstall !`来更新所有的插件
+- PlugUpdate： 更新插件
+- PlugClean：移除未使用的插件，需要确认；如果自动移除，加入!
+- PlugSearch：搜索插件，加入!会刷新本地缓存
+
+上述的命令可以按如下两种方法执行：
+
+1. 进入vim，`:PluginInstall`
+2. `vim +PluginInstall -qall`
 
 ### 脚本变量作用域
 

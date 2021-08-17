@@ -27,7 +27,7 @@ GENERATE_TREEVIEW = NO
    cp -rf <source dirs> <docset name>.docset/Contents/Resources/Documents
    ```
 
-2.  在Contents目录创建一个Info.plist的文件，更新内容如下
+2. 在Contents目录创建一个Info.plist的文件，更新内容如下
 
    ```shell
    cat <<- EOF > <docset name>.docset/Contents/Info.plist
@@ -38,22 +38,22 @@ GENERATE_TREEVIEW = NO
    <dict>
    	<!-- ~~~docset name~~~ -->
    	<key>CFBundleIdentifier</key>
-   	<string>nginx</string>
+   		<string>nginx</string>
    	<!-- ~~~Name show in zeal, Important!!~~~ -->
    	<key>CFBundleName</key>
-   	<string>Nginx</string>
+   		<string>Nginx</string>
    	<!-- ~~~name in dash website? most time same as CFBundleIdentifier~~~ -->
    	<key>DocSetPlatformFamily</key>
-   	<string>nginx</string>
+   		<string>nginx</string>
    	<!-- ~~~index page~~~ -->
    	<key>dashIndexFilePath</key>
-     <string>nasmdoc0.html</string>
-     <!-- ~~~dash type docset~~~ -->
+     		<string>nasmdoc0.html</string>
+     	<!-- ~~~dash type docset~~~ -->
    	<key>isDashDocset</key>
-   	<true/>
+   		<true/>
    	<!-- ~~~Optional: support TOC~~~ -->
    	<key>DashDocSetFamily</key>
-   	<string>dashtoc</string>
+   		<string>dashtoc</string>
    </dict>
    </plist>
    EOF
@@ -180,7 +180,7 @@ GENERATE_TREEVIEW = NO
 
 5. 添加代码交互功能
 
-   从zeal 4.0开始，可以在必要的代码片段处添加"play groud"按钮，用于和用户进行交互。需要在Info.plist文件中添加阿配置信息`DashDocSetPlayURL = <interactive website>`
+   从zeal 4.0开始，可以在必要的代码片段处添加"play groud"按钮，用于和用户进行交互。需要在Info.plist文件中添加配置信息`DashDocSetPlayURL = <interactive website>`
 
 6. 添加Javascript的支持
 
