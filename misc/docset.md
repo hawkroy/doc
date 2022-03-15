@@ -27,7 +27,7 @@ GENERATE_TREEVIEW = NO
    cp -rf <source dirs> <docset name>.docset/Contents/Resources/Documents
    ```
 
-2. 在Contents目录创建一个Info.plist的文件，更新内容如下
+2.  在Contents目录创建一个Info.plist的文件，更新内容如下
 
    ```shell
    cat <<- EOF > <docset name>.docset/Contents/Info.plist
@@ -38,22 +38,22 @@ GENERATE_TREEVIEW = NO
    <dict>
    	<!-- ~~~docset name~~~ -->
    	<key>CFBundleIdentifier</key>
-   		<string>nginx</string>
+   	<string>nginx</string>
    	<!-- ~~~Name show in zeal, Important!!~~~ -->
    	<key>CFBundleName</key>
-   		<string>Nginx</string>
+   	<string>Nginx</string>
    	<!-- ~~~name in dash website? most time same as CFBundleIdentifier~~~ -->
    	<key>DocSetPlatformFamily</key>
-   		<string>nginx</string>
+   	<string>nginx</string>
    	<!-- ~~~index page~~~ -->
    	<key>dashIndexFilePath</key>
-     		<string>nasmdoc0.html</string>
+     	<string>nasmdoc0.html</string>
      	<!-- ~~~dash type docset~~~ -->
    	<key>isDashDocset</key>
-   		<true/>
+   	<true/>
    	<!-- ~~~Optional: support TOC~~~ -->
    	<key>DashDocSetFamily</key>
-   		<string>dashtoc</string>
+   	<string>dashtoc</string>
    </dict>
    </plist>
    EOF

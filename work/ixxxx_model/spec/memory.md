@@ -51,24 +51,24 @@ Memory系统从处理器的主流水线看来，是一个用来访问内存的�
     当store指令的sta/std指令已经从ROB中退休后，当前store进入"senior"状态——表明当前store可以进行memory的回写了。对于x86处理器来说，store的回写必须按序回写，且回写的对外可见(global observe)也必须是按序可见的。所以，对于store流水线来说，store buffer会从当前最老的store开始进入store流水线执行，如果进入流水线的store可以正常完成，则后续所有的store回写可以pipe写入；否则，后续的store会replay，重新进入store流水线进行尝试。对于store来说，正常完成表示：
 
     - store在L1D cache hit，则data直接写入L1D cache
-- store在L1D cache miss，但是可以push进入fill buffer
-  
+    - store在L1D cache miss，但是可以push进入fill buffer
+    
   - MOB重执行逻辑
-
+  
     对于load/sta指令来说，当其在load/sta流水线遇到各种打断当前load/sta执行的情况时，会回到load/sab buffer中等待stall原因解除。当stall原因解除后，load/sta会被唤醒，并重新进入主流水线中的schedule流水线开始新的执行过程。当有多个load/sta被唤醒的时候，这些load/sta可能来自于不同的phythread。所以在决定load/sta访问主流水线的schedule阶段时，需要一次phythread的仲裁
-
+  
   - FillBuffer控制逻辑
-
+  
     当store/load出现L1D cache访问miss的情况，则会push进入fill buffer，由fill buffer代理访问下层的内存子系统——这里为UL2 Cache。对于load来说，fill buffer的作用比较单纯，仅仅是把data load回L1D Cache即可，但是对于store来说，需要在fill buffer中考虑memory consistency的问题——即store的顺序问题，对于支持OoO RFO(Out-Of-Order RFO)的处理器，在store分配fill buffer的同时，需要分配GoB(Global-Observe-Buffer)单元，用于控制store的回写顺序
-
+  
   - TLB/PMH逻辑
-
+  
     对于load/sta流水线来说，因为目前软件的load/store指令使用的地址全部是VA(virtual-address)地址，所以需要进行页转换(Page-translation)到PA(physical-address)，这一部分的工作由TLB(translation-lookaside-buffer)/PMH(page-miss-handler)部分完成。对于TLB来说，其有2级TLB组成，只有2级TLB全部miss的时候，会使用PMH单元进行页表的访问；在页表访问的过程中，处理器提供了4K页的页目录缓存(PDECache)，如果PDECache命中，则PMH只需要在进行一次页表访问拿到正确的物理页映射即可；否则 ，PMH需要根据多级页表结构逐级从内存子系统中获取页表信息。对于PMH来说，其需要访问的页表数据只会存在于UL2以下的内存子系统中。
-
+  
   - L1D Hardware Prefetcher逻辑
-
+  
     ==TODO：待补充==
-
+  
 - UL2 Part
 
   为处理器提供了更大的二级缓存，每个处理器核心私有。对于目前的大部分应用而言，大部分时间的处理是UL2 hit的(对于最新的benchmark，可能UL2的大小也要相应增大)。UL2的部分主要包括3个部分的内容：
